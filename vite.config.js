@@ -12,6 +12,10 @@ export default defineConfig(({ mode }) => {
       port: 5174,
       proxy: {
         '/api': `http://127.0.0.1:${apiPort}`
+      },
+      watch: {
+        // The bundled tectonic binary lives under server/bin; never watch it.
+        ignored: ['**/server/bin/**']
       }
     }
   };

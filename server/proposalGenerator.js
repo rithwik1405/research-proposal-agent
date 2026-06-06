@@ -26,9 +26,25 @@ const EMPTY_PROJECT_FOR_SERVER = {
 
 const SYSTEM_PROMPT = `You are a research proposal agent for a CS research proposal.
 
-Return strict JSON with this shape:
+Produce TWO outputs, in this exact order, each in its own fenced code block. Do NOT put the LaTeX inside JSON.
+
+First, the complete proposal as LaTeX in a latex code block:
+\`\`\`latex
+<complete compile-ready LaTeX source for proposal.tex>
+\`\`\`
+
+Then, a short review object in a json code block:
+\`\`\`json
 {
-  "proposalLatex": "complete, compile-ready LaTeX source for proposal.tex",
+  "reviewerScore": {
+    "overall": 3.5,
+    "criteria": [
+      { "name": "Significance", "score": 4, "comment": "one concise sentence" },
+      { "name": "Approach", "score": 3, "comment": "one concise sentence" },
+      { "name": "Innovation", "score": 3, "comment": "one concise sentence" },
+      { "name": "Feasibility", "score": 4, "comment": "one concise sentence" }
+    ]
+  },
   "complianceMatrix": [
     {
       "requirement": "requirement text",
@@ -40,18 +56,37 @@ Return strict JSON with this shape:
   "evaluationReport": "plain text or Markdown report with missing items, weak claims, timeline risks, and revision priorities",
   "questions": ["short clarifying question"]
 }
+\`\`\`
+
+Score like a strict grant reviewer on a 1-5 scale (1 = poor, 3 = acceptable, 5 = excellent). Significance = importance of the problem; Approach = soundness and clarity of method and evaluation; Innovation = novelty versus prior work; Feasibility = credible scope, milestones, and resources. overall is the mean of the four criteria, rounded to one decimal. Be discerning: reserve 5s for genuinely strong sections.
+
+The json block must be small and must not contain LaTeX. Keep the two blocks separate.
 
 Rules:
 - The proposal artifact must be LaTeX, not Markdown.
 - Return a complete LaTeX document with \\documentclass[11pt]{article}, 1-inch margins, title, sections, and bibliography/source notes.
 - Use compile-safe LaTeX. Avoid minted, shell-escape, external images, custom fonts, or packages that require extra system tools.
-- Do not use \\includegraphics or reference external image files. Build figures directly in LaTeX with text boxes, minipages, tabular layouts, lists, or simple arrows.
+- Do not use \\includegraphics or external image files. Do not use TikZ, pgf, or pstricks. Do not use the \\begin{center}...\\end{center} environment or \\begin{minipage} — these cause nesting errors.
+- Build the figure with EXACTLY this safe, balanced pattern (use \\centering, a tabular, and a caption — nothing nested):
+\\begin{figure}[h]
+\\centering
+\\begin{tabular}{|c|}
+\\hline
+Game state $\\rightarrow$ Agent action $\\rightarrow$ Data log $\\rightarrow$ Bug/balance analysis $\\rightarrow$ Report \\\\
+\\hline
+\\end{tabular}
+\\caption{Workflow of the proposed agent.}
+\\end{figure}
+- CRITICAL: every \\begin{X} must have a matching \\end{X} in the correct order. Never close one environment with another's \\end. Keep LaTeX simple so it compiles on the first try.
 - Write the final artifact as a research proposal, not as a short course implementation report.
 - Keep the proposed research plan credible, appropriately scoped, and supported by milestones, resources, risks, and evaluation criteria.
 - Mark unsupported claims as assumptions.
 - Include a concrete agent workflow when the method involves an agent.
 - Include at least one LaTeX-native figure, diagram, workflow chart, or architecture sketch with a caption.
-- Do not invent citations. Use source notes or assumptions when sources are missing.`;
+- Do not invent citations. Use source notes or assumptions when sources are missing.
+- If the input includes a "sources" list, treat those as the real literature for this proposal: the References section MUST list those sources (author, year, title), and the related-work and novelty discussion MUST cite them inline. Do NOT list "course requirements", "provided demo workflow", or the assignment itself as references. Do not invent citations beyond the provided sources; for any other claim, use source notes or assumptions.
+- If no sources are provided, keep a brief References/source-notes section and clearly mark unsupported claims as assumptions.
+- If "revisionNotes" are provided, treat them as the author's revision instructions for this draft and apply them directly (e.g., tighten scope, sharpen the research question, add a baseline).`;
 
 const QUESTION_SYSTEM_PROMPT = `You are running an interactive proposal-agent workflow.
 
@@ -197,12 +232,29 @@ export async function generateProposal(payload) {
   const project = normalizePayload(payload);
   const requirements = project.requirements || DEFAULT_REQUIREMENTS;
   const checklist = extractChecklist(requirements);
+  const sources = normalizeSources(payload.sources);
+  const notes = clean(payload.notes);
 
   if (process.env.LLM_API_KEY && process.env.LLM_API_URL) {
-    return generateWithApi(project, checklist);
+    return generateWithApi(project, checklist, sources, notes);
   }
 
   return generateLocally(project, checklist);
+}
+
+// Trim user-provided sources to a small, prompt-safe shape.
+function normalizeSources(sources) {
+  if (!Array.isArray(sources)) return [];
+
+  return sources
+    .map((source) => ({
+      title: clean(source.title),
+      authors: clean(source.authors),
+      year: source.year ? String(source.year) : '',
+      abstract: clean(source.abstract).slice(0, 400)
+    }))
+    .filter((source) => source.title)
+    .slice(0, 12);
 }
 
 async function refineProjectWithApi(payload) {
@@ -240,7 +292,7 @@ async function refineProjectWithApi(payload) {
   };
 }
 
-async function generateWithApi(project, checklist) {
+async function generateWithApi(project, checklist, sources = [], notes = '') {
   const model = clean(process.env.LLM_MODEL);
 
   if (!model) {
@@ -250,21 +302,35 @@ async function generateWithApi(project, checklist) {
   const promptPayload = {
     project,
     checklist,
+    sources,
+    revisionNotes: notes,
     outputContract: {
-      proposalLatex: 'Complete compile-ready LaTeX source for proposal.tex',
-      complianceMatrix: 'Array of requirement coverage rows',
-      evaluationReport: 'Plain text or Markdown self-evaluation',
-      questions: 'Remaining clarifying questions'
+      latexBlock: 'Complete compile-ready LaTeX source for proposal.tex, in a ```latex fence',
+      jsonBlock: 'A ```json fence with complianceMatrix, evaluationReport, and questions'
     }
   };
 
-  const content = await callModel({
+  // The proposal returns a ```latex block plus a small ```json block, so LaTeX
+  // never has to be escaped inside JSON. Retry once if the LaTeX is missing.
+  let content = await callModel({
     systemPrompt: SYSTEM_PROMPT,
     payload: promptPayload,
     model,
-    temperature: 0.2
+    temperature: 0.2,
+    jsonMode: false
   });
-  const parsed = parseJsonContent(content);
+  let parsed = parseProposalResponse(content);
+
+  if (!hasUsableProposal(parsed)) {
+    content = await callModel({
+      systemPrompt: SYSTEM_PROMPT,
+      payload: promptPayload,
+      model,
+      temperature: 0.2,
+      jsonMode: false
+    });
+    parsed = parseProposalResponse(content);
+  }
 
   return {
     mode: 'api',
@@ -277,15 +343,23 @@ async function generateWithApi(project, checklist) {
   };
 }
 
-async function callModel({ systemPrompt, payload, model, temperature }) {
+// A usable proposal needs real LaTeX and a populated compliance matrix; if
+// either is missing the JSON was malformed or truncated.
+function hasUsableProposal(parsed) {
+  const latex = unwrapLatexCandidate(clean(parsed?.proposalLatex));
+  const matrixOk = Array.isArray(parsed?.complianceMatrix) && parsed.complianceMatrix.length > 0;
+  return looksLikeLatex(latex) && matrixOk;
+}
+
+async function callModel({ systemPrompt, payload, model, temperature, jsonMode = true }) {
   if (getProvider() === 'gemini') {
-    return callGemini({ systemPrompt, payload, model, temperature });
+    return callGemini({ systemPrompt, payload, model, temperature, jsonMode });
   }
 
   return callOpenAiCompatible({ systemPrompt, payload, model, temperature });
 }
 
-async function callGemini({ systemPrompt, payload, model, temperature }) {
+async function callGemini({ systemPrompt, payload, model, temperature, jsonMode = true }) {
   const baseUrl = clean(process.env.LLM_API_URL) || 'https://generativelanguage.googleapis.com/v1beta';
   const endpoint = `${baseUrl.replace(/\/$/, '')}/models/${encodeURIComponent(model)}:generateContent`;
   const response = await fetch(endpoint, {
@@ -306,7 +380,10 @@ async function callGemini({ systemPrompt, payload, model, temperature }) {
       ],
       generationConfig: {
         temperature,
-        responseMimeType: 'application/json'
+        maxOutputTokens: 32768,
+        // Only force JSON output when the whole response is JSON. The proposal
+        // call returns mixed fenced blocks (latex + json), so JSON mode is off.
+        ...(jsonMode ? { responseMimeType: 'application/json' } : {})
       }
     })
   });
@@ -389,6 +466,7 @@ ${questions.length ? questions.map((question) => `- ${question}`).join('\n') : '
     provider: 'template',
     proposalLatex,
     complianceMatrix,
+    reviewerScore: normalizeReviewerScore(null, complianceMatrix),
     evaluationReport,
     questions,
     transcript: {
@@ -949,33 +1027,139 @@ function parseJsonContent(content) {
   try {
     return JSON.parse(candidate);
   } catch {
+    // Malformed JSON (often bad LaTeX escaping). Salvage the proposal draft via
+    // regex so the real generated proposal survives instead of being dropped to
+    // the generic local template.
+    const recoveredLatex = extractNestedLatexString(candidate);
+
     return {
-      proposalLatex: looksLikeLatex(trimmed) ? trimmed : '',
+      proposalLatex: recoveredLatex || (looksLikeLatex(trimmed) ? trimmed : ''),
       complianceMatrix: [],
-      evaluationReport: '# Evaluation Report\n\nThe API returned text that was not JSON.',
+      evaluationReport: '# Evaluation Report\n\nThe API returned text that was not valid JSON; recovered the proposal draft directly.',
       questions: ['Should the API prompt be tightened to return strict JSON?']
     };
   }
 }
 
+// Parse the proposal response, which is a ```latex code block followed by a
+// small ```json block. Keeping LaTeX out of the JSON avoids the escaping
+// failures that come from embedding a whole document in a JSON string.
+function parseProposalResponse(content) {
+  const text = clean(content);
+  const latexBlock = extractFencedBlock(text, ['latex', 'tex']);
+  const jsonBlock = extractFencedBlock(text, ['json']);
+
+  let meta = {};
+  if (jsonBlock) {
+    try {
+      meta = JSON.parse(jsonBlock);
+    } catch {
+      meta = {};
+    }
+  }
+
+  const proposalLatex = looksLikeLatex(latexBlock)
+    ? latexBlock
+    : looksLikeLatex(text)
+      ? text
+      : extractNestedLatexString(text) || latexBlock;
+
+  return {
+    proposalLatex,
+    complianceMatrix: meta.complianceMatrix,
+    evaluationReport: meta.evaluationReport,
+    questions: meta.questions,
+    reviewerScore: meta.reviewerScore
+  };
+}
+
+function extractFencedBlock(text, langs) {
+  const alt = langs.join('|');
+  const source = String(text || '');
+  const full = source.match(new RegExp('```(?:' + alt + ')\\s*([\\s\\S]*?)```', 'i'));
+
+  if (full?.[1]) {
+    return full[1].trim();
+  }
+
+  // Opening fence with no closing fence (truncated output): take to the end.
+  const open = source.match(new RegExp('```(?:' + alt + ')\\s*([\\s\\S]*)$', 'i'));
+  return open?.[1]?.trim() || '';
+}
+
 function coerceResult(result, project, checklist) {
+  const complianceMatrix = Array.isArray(result.complianceMatrix) && result.complianceMatrix.length
+    ? result.complianceMatrix.map((row) => ({
+        requirement: clean(row.requirement),
+        status: clean(row.status) || 'Needs work',
+        evidence: clean(row.evidence),
+        fix: clean(row.fix)
+      }))
+    : checklist.map((requirement) => ({
+        requirement,
+        status: 'Needs work',
+        evidence: 'API did not provide matrix evidence.',
+        fix: 'Regenerate with stricter output instructions.'
+      }));
+
   return {
     proposalLatex: extractProposalLatex(result, project),
-    complianceMatrix: Array.isArray(result.complianceMatrix) && result.complianceMatrix.length
-      ? result.complianceMatrix.map((row) => ({
-          requirement: clean(row.requirement),
-          status: clean(row.status) || 'Needs work',
-          evidence: clean(row.evidence),
-          fix: clean(row.fix)
-        }))
-      : checklist.map((requirement) => ({
-          requirement,
-          status: 'Needs work',
-          evidence: 'API did not provide matrix evidence.',
-          fix: 'Regenerate with stricter output instructions.'
-        })),
+    complianceMatrix,
+    reviewerScore: normalizeReviewerScore(result.reviewerScore, complianceMatrix),
     evaluationReport: clean(result.evaluationReport) || '# Evaluation Report\n\nNo evaluation report returned.',
     questions: Array.isArray(result.questions) ? result.questions.map(clean).filter(Boolean).slice(0, 5) : []
+  };
+}
+
+const REVIEWER_CRITERIA = ['Significance', 'Approach', 'Innovation', 'Feasibility'];
+
+// Normalize the model's reviewer score; if missing, estimate an overall from
+// compliance coverage so the Review tab always has a score to show.
+function normalizeReviewerScore(raw, complianceMatrix) {
+  const clampScore = (value) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return null;
+    return Math.min(5, Math.max(1, Math.round(num * 10) / 10));
+  };
+
+  const rawCriteria = Array.isArray(raw?.criteria) ? raw.criteria : [];
+  const criteria = REVIEWER_CRITERIA.map((name) => {
+    const match = rawCriteria.find((item) => clean(item?.name).toLowerCase() === name.toLowerCase());
+    return {
+      name,
+      score: clampScore(match?.score),
+      comment: clean(match?.comment)
+    };
+  });
+
+  const scored = criteria.filter((item) => item.score != null);
+
+  if (scored.length) {
+    const overall = clampScore(raw?.overall) ?? Math.round((scored.reduce((sum, item) => sum + item.score, 0) / scored.length) * 10) / 10;
+    return {
+      overall,
+      estimated: false,
+      criteria: criteria.map((item) => ({
+        name: item.name,
+        score: item.score ?? overall,
+        comment: item.comment || 'Scored by the reviewer agent.'
+      }))
+    };
+  }
+
+  // Fallback: estimate from coverage (1-5 scale) when the model gave no score.
+  const total = complianceMatrix.length || 1;
+  const covered = complianceMatrix.filter((row) => /^covered$/i.test(row.status)).length;
+  const estimatedOverall = Math.round((1 + 4 * (covered / total)) * 10) / 10;
+
+  return {
+    overall: estimatedOverall,
+    estimated: true,
+    criteria: REVIEWER_CRITERIA.map((name) => ({
+      name,
+      score: estimatedOverall,
+      comment: 'Estimated from section coverage; the model did not return a score.'
+    }))
   };
 }
 

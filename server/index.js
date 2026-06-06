@@ -3,6 +3,7 @@ import cors from 'cors';
 import express from 'express';
 import { proposalLatexToPdf } from './pdfExport.js';
 import { answerAgentQuestion, generateProposal, startAgentSession } from './proposalGenerator.js';
+import { searchPapers } from './literature.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -67,6 +68,24 @@ app.post('/api/proposal', async (request, response) => {
   } catch (error) {
     response.status(500).json({
       error: 'Proposal generation failed.',
+      detail: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post('/api/literature/search', async (request, response) => {
+  try {
+    const query = String(request.body?.query || '').trim();
+
+    if (!query) {
+      response.status(400).json({ error: 'A search query is required.' });
+      return;
+    }
+
+    response.json({ papers: await searchPapers(query) });
+  } catch (error) {
+    response.status(500).json({
+      error: 'Literature search failed.',
       detail: error instanceof Error ? error.message : String(error)
     });
   }

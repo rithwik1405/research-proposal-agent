@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BookOpen,
   CheckCircle2,
   ClipboardCheck,
   Download,
@@ -9,7 +10,8 @@ import {
   Play,
   RefreshCw,
   Send,
-  Sparkles
+  Sparkles,
+  Upload
 } from 'lucide-react';
 
 const DEFAULT_REQUIREMENTS = `Proposal must include:
@@ -64,6 +66,8 @@ const TABS = [
 
 const MEMORY_KEY = 'proposal-agent-final-project-memory-v1';
 
+const RUN_LOG_PAGE_SIZE = 6;
+
 function App() {
   const [topicInput, setTopicInput] = useState('');
   const [project, setProject] = useState(EMPTY_PROJECT);
@@ -79,6 +83,12 @@ function App() {
   const [activeTab, setActiveTab] = useState('pdf');
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [decisionIndex, setDecisionIndex] = useState(0);
+  const [decisionChoices, setDecisionChoices] = useState({});
+  const [revisionNotes, setRevisionNotes] = useState('');
+  const [runLogPage, setRunLogPage] = useState(0);
+  const [papers, setPapers] = useState([]);
+  const [sourcesBusy, setSourcesBusy] = useState('');
+  const lastQueryRef = useRef('');
   const [memorySavedAt, setMemorySavedAt] = useState('');
   const [memoryReady, setMemoryReady] = useState(false);
 
@@ -94,6 +104,13 @@ function App() {
   const currentDecision = decisions[decisionIndex] || null;
   const currentQuestion = questions[0];
 
+  const runLogPages = Math.max(1, Math.ceil(runLog.length / RUN_LOG_PAGE_SIZE));
+  const safeRunLogPage = Math.min(runLogPage, runLogPages - 1);
+  const visibleRunLog = runLog.slice(
+    safeRunLogPage * RUN_LOG_PAGE_SIZE,
+    safeRunLogPage * RUN_LOG_PAGE_SIZE + RUN_LOG_PAGE_SIZE
+  );
+
   useEffect(() => {
     loadSavedMemory({ silent: true });
     setMemoryReady(true);
@@ -106,9 +123,27 @@ function App() {
   }, [pdfUrl]);
 
   useEffect(() => {
+    setRunLogPage(Math.max(0, Math.ceil(runLog.length / RUN_LOG_PAGE_SIZE) - 1));
+  }, [runLog.length]);
+
+  // Auto-suggest related papers once the idea has a title and none are loaded yet.
+  // Keyed on project.title only — typing the rough idea must not trigger searches.
+  useEffect(() => {
+    const title = (project.title || '').trim();
+    if (!title || papers.length || title === lastQueryRef.current) return;
+
+    const handle = setTimeout(() => {
+      lastQueryRef.current = title;
+      findPapers();
+    }, 700);
+
+    return () => clearTimeout(handle);
+  }, [project.title, papers.length]);
+
+  useEffect(() => {
     if (!memoryReady) return;
 
-    if (!topicInput && !fieldSuggestions.length && !decisions.length && !result) {
+    if (!topicInput && !fieldSuggestions.length && !decisions.length && !result && !papers.length) {
       return;
     }
 
@@ -124,7 +159,10 @@ function App() {
     runLog,
     activeTab,
     suggestionIndex,
-    decisionIndex
+    decisionIndex,
+    decisionChoices,
+    revisionNotes,
+    papers
   ]);
 
   async function startAgent() {
@@ -132,7 +170,7 @@ function App() {
   }
 
   async function startSampleAgent() {
-    const sampleTopic = 'Citation-grounded agent for literature review workflows';
+    const sampleTopic = 'AI agent that playtests games to detect bugs and balance issues';
     setTopicInput(sampleTopic);
     return startAgentForTopic(sampleTopic);
   }
@@ -214,18 +252,31 @@ function App() {
       const data = await postJson('/api/proposal', {
         ...project,
         topic: project.topic || project.title,
-        requirements: DEFAULT_REQUIREMENTS
+        requirements: DEFAULT_REQUIREMENTS,
+        sources: papers.filter((paper) => paper.selected),
+        notes: revisionNotes
       });
-      const nextPdfUrl = await exportPdfUrl(data.proposalLatex, project.title || 'proposal');
 
       setResult(data);
-      updatePdfUrl(nextPdfUrl);
-      setActiveTab('pdf');
       setRunLog((current) => [
         ...current,
         logEntry('Draft', `Generated proposal using ${data.mode}.`),
         logEntry('Review', `Coverage ${countCovered(data.complianceMatrix)}/${data.complianceMatrix?.length || 0}.`)
       ]);
+
+      // Compile the PDF separately so a missing LaTeX engine never discards the draft.
+      try {
+        const nextPdfUrl = await exportPdfUrl(data.proposalLatex, project.title || 'proposal');
+        updatePdfUrl(nextPdfUrl);
+        setActiveTab('pdf');
+      } catch (pdfError) {
+        updatePdfUrl('');
+        setActiveTab('latex');
+        setRunLog((current) => [
+          ...current,
+          logEntry('Export', `Draft ready, but PDF compile failed: ${summarizePdfError(pdfError)} Open the LaTeX tab or download .tex.`)
+        ]);
+      }
     } catch (requestError) {
       setError(readError(requestError));
     } finally {
@@ -233,7 +284,81 @@ function App() {
     }
   }
 
-  function acceptSuggestion(suggestion) {
+  async function findPapers(queryArg) {
+    // Prefer the rough idea/topic over the formal title — it yields far more
+    // relevant results from OpenAlex than decorative title wording.
+    const query = (queryArg || project.topic || topicInput || project.title || '').trim();
+    if (!query) return;
+
+    setSourcesBusy('searching');
+    setError('');
+
+    try {
+      const data = await postJson('/api/literature/search', { query });
+      const fetched = (data.papers || []).map((paper) => ({ ...paper, uploaded: false, selected: false }));
+
+      setPapers((current) => {
+        const uploads = current.filter((paper) => paper.uploaded);
+        const previouslySelected = new Set(current.filter((paper) => !paper.uploaded && paper.selected).map((paper) => paper.id));
+        const merged = fetched.map((paper) => ({ ...paper, selected: previouslySelected.has(paper.id) }));
+        return [...merged, ...uploads];
+      });
+      setRunLog((current) => [
+        ...current,
+        logEntry('Sources', `Suggested ${fetched.length} related paper(s) for "${query}".`)
+      ]);
+    } catch (requestError) {
+      setError(readError(requestError));
+    } finally {
+      setSourcesBusy('');
+    }
+  }
+
+  function togglePaper(id) {
+    setPapers((current) => current.map((paper) => (paper.id === id ? { ...paper, selected: !paper.selected } : paper)));
+    clearArtifacts();
+  }
+
+  async function handleUpload(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+
+    setSourcesBusy('uploading');
+    setError('');
+
+    try {
+      for (const file of files) {
+        const uploaded = {
+          id: `upload-${file.name}-${file.size}`,
+          title: file.name.replace(/\.[^.]+$/, ''),
+          authors: 'Uploaded by you',
+          year: '',
+          url: '',
+          uploaded: true,
+          selected: true
+        };
+
+        setPapers((current) => (current.some((paper) => paper.id === uploaded.id) ? current : [...current, uploaded]));
+      }
+      setRunLog((current) => [...current, logEntry('Sources', `Uploaded ${files.length} file(s) (selected by default).`)]);
+      clearArtifacts();
+    } catch (uploadError) {
+      setError(readError(uploadError));
+    } finally {
+      setSourcesBusy('');
+    }
+  }
+
+  function toggleSuggestion(suggestion) {
+    const accepted = project[suggestion.field] === suggestion.value;
+
+    if (accepted) {
+      // Un-accept: clear the field so a different framing can be tried.
+      updateProjectField(suggestion.field, '');
+      setRunLog((current) => [...current, logEntry('Undo', `Un-accepted ${suggestion.label || suggestion.field}.`)]);
+      return;
+    }
+
     updateProjectField(suggestion.field, suggestion.value);
     advanceSuggestion();
     setRunLog((current) => [...current, logEntry('Accept', `Accepted ${suggestion.label || suggestion.field}.`)]);
@@ -250,12 +375,22 @@ function App() {
   }
 
   function chooseOption(decision, option) {
+    const alreadyChosen = decisionChoices[decision.id] === option.label;
+
+    if (alreadyChosen) {
+      // Clicking the chosen option again clears it, so you can try another.
+      updateProjectField(decision.field, '');
+      setDecisionChoices((current) => {
+        const next = { ...current };
+        delete next[decision.id];
+        return next;
+      });
+      setRunLog((current) => [...current, logEntry('Decision', `Cleared choice for ${decision.title}.`)]);
+      return;
+    }
+
     updateProjectField(decision.field, option.value);
-    setDecisions((current) => {
-      const next = current.filter((item) => item.id !== decision.id);
-      setDecisionIndex((index) => Math.min(index, Math.max(next.length - 1, 0)));
-      return next;
-    });
+    setDecisionChoices((current) => ({ ...current, [decision.id]: option.label }));
     setRunLog((current) => [...current, logEntry('Decision', `Selected ${option.label} for ${decision.title}.`)]);
   }
 
@@ -303,6 +438,10 @@ function App() {
     setActiveTab('pdf');
     setSuggestionIndex(0);
     setDecisionIndex(0);
+    setDecisionChoices({});
+    setRevisionNotes('');
+    setPapers([]);
+    lastQueryRef.current = '';
   }
 
   function downloadLatex() {
@@ -349,7 +488,10 @@ function App() {
       runLog,
       activeTab,
       suggestionIndex,
-      decisionIndex
+      decisionIndex,
+      decisionChoices,
+      revisionNotes,
+      papers
     };
 
     localStorage.setItem(MEMORY_KEY, JSON.stringify(snapshot));
@@ -379,6 +521,9 @@ function App() {
       setActiveTab(snapshot.activeTab || 'pdf');
       setSuggestionIndex(Number(snapshot.suggestionIndex || 0));
       setDecisionIndex(Number(snapshot.decisionIndex || 0));
+      setDecisionChoices(snapshot.decisionChoices && typeof snapshot.decisionChoices === 'object' ? snapshot.decisionChoices : {});
+      setRevisionNotes(snapshot.revisionNotes || '');
+      setPapers(Array.isArray(snapshot.papers) ? snapshot.papers : []);
       setMemorySavedAt(snapshot.savedAt || '');
       setError('');
 
@@ -408,7 +553,7 @@ function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <h1>Research Proposal Agent</h1>
+        <h1>Research Mentor</h1>
         <span className="status-pill">
           <Sparkles size={16} aria-hidden="true" />
           {result?.mode || (fieldSuggestions.length ? 'structuring' : 'ready')}
@@ -427,7 +572,7 @@ function App() {
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') startAgent();
                 }}
-                placeholder="Example: Agent for citation-grounded literature review"
+                placeholder="Example: AI agent that playtests games for bugs and balance issues"
               />
             </label>
             <div className="actions framework-actions">
@@ -481,6 +626,14 @@ function App() {
             ))}
           </div>
 
+          <RelatedWorksPanel
+            papers={papers}
+            busy={sourcesBusy}
+            onToggle={togglePaper}
+            onUpload={handleUpload}
+            onRefresh={() => findPapers()}
+          />
+
           <div className="workspace-grid">
             <section className="workspace-panel suggestions-panel">
               <PanelHeader title="LLM Suggested Structure" meta={`${fieldSuggestions.length} fields`} />
@@ -504,10 +657,10 @@ function App() {
                         <button
                           className={project[currentSuggestion.field] === currentSuggestion.value ? 'secondary accepted' : 'primary'}
                           type="button"
-                          onClick={() => acceptSuggestion(currentSuggestion)}
+                          onClick={() => toggleSuggestion(currentSuggestion)}
                         >
                           <CheckCircle2 size={16} aria-hidden="true" />
-                          {project[currentSuggestion.field] === currentSuggestion.value ? 'Accepted' : 'Accept and Next'}
+                          {project[currentSuggestion.field] === currentSuggestion.value ? 'Accepted — Undo' : 'Accept and Next'}
                         </button>
                         <button className="secondary" type="button" onClick={skipSuggestion}>
                           Skip
@@ -555,12 +708,12 @@ function App() {
             </section>
 
             <section className="workspace-panel decisions-panel">
-              <PanelHeader title="Decision Needed" meta={`${decisions.length} open`} />
+              <PanelHeader title="Decision Needed" meta={`${Object.keys(decisionChoices).length}/${decisions.length} decided`} />
               {decisions.length ? (
                 <div className="decision-deck">
                   <div className="deck-progress">
                     <span>{Math.min(decisionIndex + 1, decisions.length)} / {decisions.length}</span>
-                    <strong>{decisions.length} open</strong>
+                    <strong>{Object.keys(decisionChoices).length} decided</strong>
                   </div>
                   {currentDecision ? (
                     <article className="decision-card active-card" key={currentDecision.id}>
@@ -569,12 +722,17 @@ function App() {
                       <div className="option-stack">
                         {currentDecision.options.map((option) => (
                           <button
-                            className="option-button"
+                            className={
+                              decisionChoices[currentDecision.id] === option.label ? 'option-button selected' : 'option-button'
+                            }
                             key={`${currentDecision.id}-${option.label}`}
                             type="button"
                             onClick={() => chooseOption(currentDecision, option)}
                           >
-                            <strong>{option.label}</strong>
+                            <strong>
+                              {decisionChoices[currentDecision.id] === option.label ? <CheckCircle2 size={14} aria-hidden="true" /> : null}
+                              {option.label}
+                            </strong>
                             <span>{option.value}</span>
                             <small>{option.rationale}</small>
                           </button>
@@ -656,16 +814,42 @@ function App() {
 
           <div className="workflow-columns">
             <section className="workflow-panel">
-              <h2>Run Log</h2>
+              <div className="panel-header">
+                <h2>Run Log</h2>
+                {runLog.length ? <span>{runLog.length} entries</span> : null}
+              </div>
               {runLog.length ? (
-                <ol className="run-log">
-                  {runLog.map((entry) => (
-                    <li key={entry.id}>
-                      <span>{entry.stage}</span>
-                      <p>{entry.message}</p>
-                    </li>
-                  ))}
-                </ol>
+                <>
+                  <ol className="run-log">
+                    {visibleRunLog.map((entry) => (
+                      <li key={entry.id}>
+                        <span>{entry.stage}</span>
+                        <p>{entry.message}</p>
+                      </li>
+                    ))}
+                  </ol>
+                  {runLogPages > 1 ? (
+                    <div className="deck-nav">
+                      <button
+                        className="secondary"
+                        type="button"
+                        disabled={safeRunLogPage === 0}
+                        onClick={() => setRunLogPage((current) => Math.max(current - 1, 0))}
+                      >
+                        Previous
+                      </button>
+                      <span>{safeRunLogPage + 1} / {runLogPages}</span>
+                      <button
+                        className="secondary"
+                        type="button"
+                        disabled={safeRunLogPage >= runLogPages - 1}
+                        onClick={() => setRunLogPage((current) => Math.min(current + 1, runLogPages - 1))}
+                      >
+                        Next
+                      </button>
+                    </div>
+                  ) : null}
+                </>
               ) : (
                 <EmptyState text="Run log appears after the idea is structured." compact />
               )}
@@ -712,8 +896,25 @@ function App() {
                 </div>
                 <div>
                   <span>Provider</span>
-                  <strong>{result?.provider || 'waiting'}</strong>
+                  <strong>{result?.provider ? formatProvider(result.provider) : 'waiting'}</strong>
                 </div>
+              </div>
+
+              <div className="revision-bar">
+                <input
+                  value={revisionNotes}
+                  onChange={(event) => setRevisionNotes(event.target.value)}
+                  placeholder="Revision notes for the next draft (optional) — e.g., tighten scope, add a baseline"
+                />
+                <button
+                  className="secondary"
+                  type="button"
+                  disabled={!project.title || status !== 'idle'}
+                  onClick={generateProposal}
+                >
+                  {status === 'drafting' ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
+                  Regenerate
+                </button>
               </div>
 
               {renderArtifact(activeTab, result, pdfUrl)}
@@ -802,6 +1003,7 @@ function renderArtifact(activeTab, result, pdfUrl) {
   }
 
   if (activeTab === 'evaluation') {
+    // ReviewPanel (reviewer score) is built but parked for Stage 2.
     return <pre>{result.evaluationReport}</pre>;
   }
 
@@ -823,6 +1025,123 @@ function EmptyState({ text, compact = false }) {
       <FileText size={compact ? 24 : 32} aria-hidden="true" />
       <p>{text}</p>
     </div>
+  );
+}
+
+function ReviewPanel({ result }) {
+  const score = result?.reviewerScore;
+
+  return (
+    <div className="review-panel">
+      {score ? (
+        <div className="score-board">
+          <div className={`score-overall ${scoreTone(score.overall)}`}>
+            <span>Reviewer Score</span>
+            <strong>
+              {score.overall}
+              <small>/5</small>
+            </strong>
+            {score.estimated ? <em>estimated from coverage</em> : null}
+          </div>
+          <div className="score-criteria">
+            {(score.criteria || []).map((criterion) => (
+              <div className="score-row" key={criterion.name}>
+                <div className="score-row-head">
+                  <span>{criterion.name}</span>
+                  <strong>{criterion.score}/5</strong>
+                </div>
+                <div className="score-bar">
+                  <span
+                    className={scoreTone(criterion.score)}
+                    style={{ width: `${(Number(criterion.score) / 5) * 100}%` }}
+                  />
+                </div>
+                {criterion.comment ? <small>{criterion.comment}</small> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      <pre>{result.evaluationReport}</pre>
+    </div>
+  );
+}
+
+function scoreTone(value) {
+  const num = Number(value);
+  if (num >= 4) return 'tone-strong';
+  if (num >= 3) return 'tone-ok';
+  return 'tone-weak';
+}
+
+function RelatedWorksPanel({ papers, busy, onToggle, onUpload, onRefresh }) {
+  const selectedCount = papers.filter((paper) => paper.selected).length;
+  const searching = busy === 'searching';
+
+  return (
+    <section className="related-works">
+      <div className="panel-header">
+        <h2>
+          <BookOpen size={18} aria-hidden="true" /> Related Works
+        </h2>
+        <span>{selectedCount} selected for references</span>
+      </div>
+      <p className="related-hint">
+        Papers similar to your topic, suggested automatically. Check the ones to cite (uploads are included by default) — selected
+        papers become the proposal&apos;s References.
+      </p>
+
+      <div className="rw-actions">
+        <label className="secondary upload-btn">
+          {busy === 'uploading' ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Upload size={16} aria-hidden="true" />}
+          Upload your own
+          <input
+            type="file"
+            accept=".pdf,.txt,.md,.bib"
+            multiple
+            hidden
+            onChange={(event) => {
+              onUpload(event.target.files);
+              event.target.value = '';
+            }}
+          />
+        </label>
+        <button className="secondary" type="button" disabled={Boolean(busy)} onClick={onRefresh}>
+          {searching ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
+          Refresh suggestions
+        </button>
+      </div>
+
+      {searching && !papers.length ? (
+        <EmptyState text="Finding related papers for your topic…" compact />
+      ) : papers.length ? (
+        <ul className="paper-grid">
+          {papers.map((paper) => (
+            <li key={paper.id} className={paper.selected ? 'paper-card checked' : 'paper-card'}>
+              <label className="paper-check">
+                <input type="checkbox" checked={paper.selected} onChange={() => onToggle(paper.id)} />
+                <span className="paper-body">
+                  <strong>{paper.title}</strong>
+                  <small>
+                    {[paper.authors, paper.year, paper.citationCount != null ? `${paper.citationCount} cites` : '']
+                      .filter(Boolean)
+                      .join(' · ')}
+                    {paper.uploaded ? ' · uploaded' : ''}
+                  </small>
+                  {paper.url ? (
+                    <a href={paper.url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
+                      View paper
+                    </a>
+                  ) : null}
+                </span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <EmptyState text="Related papers appear here once your idea has a title. Use Refresh to fetch, or upload your own." compact />
+      )}
+    </section>
   );
 }
 
@@ -863,6 +1182,27 @@ function readError(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+
+function summarizePdfError(error) {
+  const text = readError(error);
+  const lines = text.split('\n').map((line) => line.trim());
+  // Prefer the engine's own "error:" line over the long command echo and warnings.
+  const picked = lines.find((line) => /^error:/i.test(line)) || lines[0] || text;
+  return picked.length > 160 ? `${picked.slice(0, 160)}…` : picked;
+}
+
+function formatProvider(provider) {
+  if (!provider) return 'waiting';
+  if (/generativelanguage|gemini/i.test(provider)) return 'Gemini';
+  if (provider === 'template') return 'Local fallback';
+
+  try {
+    return new URL(provider).hostname;
+  } catch {
+    return provider;
+  }
+}
+
 function compactResult(result) {
   if (!result) return null;
 
@@ -872,6 +1212,7 @@ function compactResult(result) {
     proposalLatex: result.proposalLatex,
     complianceMatrix: result.complianceMatrix,
     evaluationReport: result.evaluationReport,
+    reviewerScore: result.reviewerScore,
     questions: result.questions
   };
 }

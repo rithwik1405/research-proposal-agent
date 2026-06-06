@@ -1,10 +1,32 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+
+// Resolve the tectonic LaTeX engine: an explicit TECTONIC_PATH wins, then the
+// binary bundled under server/bin, and finally whatever is on the system PATH.
+function resolveTectonicBin() {
+  if (process.env.TECTONIC_PATH) {
+    return process.env.TECTONIC_PATH;
+  }
+
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const bundled = path.join(here, 'bin', process.platform === 'win32' ? 'tectonic.exe' : 'tectonic');
+
+  return existsSync(bundled) ? bundled : 'tectonic';
+}
+
+const TECTONIC_BIN = resolveTectonicBin();
+
+// Tectonic fetches LaTeX support files on first use and caches them. Pin the
+// cache to a dedicated temp dir we control so it never fails to create its
+// default location, and so it stays outside the Vite-watched project tree.
+const TECTONIC_CACHE_DIR = process.env.TECTONIC_CACHE_DIR || path.join(tmpdir(), 'tectonic-cache');
 
 export async function proposalLatexToPdf(latex, title = 'proposal') {
   const source = String(latex || '').trim();
@@ -18,11 +40,13 @@ export async function proposalLatexToPdf(latex, title = 'proposal') {
   const pdfPath = path.join(workdir, 'proposal.pdf');
 
   try {
+    await mkdir(TECTONIC_CACHE_DIR, { recursive: true });
     await writeFile(texPath, sanitizeLatexForExport(ensureCompleteLatexDocument(source, title)), 'utf8');
-    await execFileAsync('tectonic', ['--outdir', workdir, texPath], {
+    await execFileAsync(TECTONIC_BIN, ['--outdir', workdir, texPath], {
       cwd: workdir,
-      timeout: 60000,
-      maxBuffer: 1024 * 1024 * 8
+      timeout: 180000,
+      maxBuffer: 1024 * 1024 * 8,
+      env: { ...process.env, TECTONIC_CACHE_DIR }
     });
 
     return await readFile(pdfPath);
@@ -32,7 +56,40 @@ export async function proposalLatexToPdf(latex, title = 'proposal') {
 }
 
 function sanitizeLatexForExport(source) {
-  return replaceExternalImageIncludes(source);
+  return fixTikzArrowTips(replaceExternalImageIncludes(source));
+}
+
+// Safety net for model-generated TikZ: the deprecated `arrows` library tips
+// (latex', stealth') break under the modern arrows.meta library. Rewrite them
+// to the arrows.meta names and make sure that library is actually loaded.
+function fixTikzArrowTips(source) {
+  let out = String(source || '');
+
+  if (!/tikz|pgf/i.test(out)) {
+    return out;
+  }
+
+  out = out
+    .replace(/latex'/g, 'Latex')
+    .replace(/stealth'/g, 'Stealth')
+    .replace(/>=\s*latex\b/g, '>=Latex')
+    .replace(/>=\s*stealth\b/g, '>=Stealth');
+
+  if (/\\begin\{tikzpicture\}/.test(out) && !/\\usetikzlibrary\{[^}]*arrows\.meta[^}]*\}/.test(out)) {
+    if (/\\usepackage(?:\[[^\]]*\])?\{tikz\}/.test(out)) {
+      out = out.replace(
+        /(\\usepackage(?:\[[^\]]*\])?\{tikz\})/,
+        '$1\n\\usetikzlibrary{arrows.meta,positioning}'
+      );
+    } else if (/\\begin\{document\}/.test(out)) {
+      out = out.replace(
+        /(\\begin\{document\})/,
+        '\\usepackage{tikz}\n\\usetikzlibrary{arrows.meta,positioning}\n$1'
+      );
+    }
+  }
+
+  return out;
 }
 
 function replaceExternalImageIncludes(source) {
