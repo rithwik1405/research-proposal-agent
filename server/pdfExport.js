@@ -28,7 +28,7 @@ const TECTONIC_BIN = resolveTectonicBin();
 // default location, and so it stays outside the Vite-watched project tree.
 const TECTONIC_CACHE_DIR = process.env.TECTONIC_CACHE_DIR || path.join(tmpdir(), 'tectonic-cache');
 
-export async function proposalLatexToPdf(latex, title = 'proposal') {
+export async function proposalLatexToPdf(latex, title = 'proposal', figureImages = []) {
   const source = String(latex || '').trim();
 
   if (!source) {
@@ -39,9 +39,20 @@ export async function proposalLatexToPdf(latex, title = 'proposal') {
   const texPath = path.join(workdir, 'proposal.tex');
   const pdfPath = path.join(workdir, 'proposal.pdf');
 
+  // User-uploaded figures: write each image into the workdir so \includegraphics
+  // can find them, and keep the image includes (don't swap them for placeholders).
+  const images = (Array.isArray(figureImages) ? figureImages : [figureImages]).filter(
+    (image) => image && image.base64 && image.name
+  );
+  const hasImages = images.length > 0;
+
   try {
     await mkdir(TECTONIC_CACHE_DIR, { recursive: true });
-    await writeFile(texPath, sanitizeLatexForExport(ensureCompleteLatexDocument(source, title)), 'utf8');
+    for (const image of images) {
+      const base64 = String(image.base64).replace(/^data:[^;]+;base64,/, '');
+      await writeFile(path.join(workdir, path.basename(image.name)), Buffer.from(base64, 'base64'));
+    }
+    await writeFile(texPath, sanitizeLatexForExport(ensureCompleteLatexDocument(source, title), { keepImages: hasImages }), 'utf8');
     await execFileAsync(TECTONIC_BIN, ['--outdir', workdir, texPath], {
       cwd: workdir,
       timeout: 180000,
@@ -55,8 +66,23 @@ export async function proposalLatexToPdf(latex, title = 'proposal') {
   }
 }
 
-function sanitizeLatexForExport(source) {
-  return fixTikzArrowTips(replaceExternalImageIncludes(source));
+function sanitizeLatexForExport(source, { keepImages = false } = {}) {
+  // Keep \includegraphics only when the image file is actually provided;
+  // otherwise replace it with a LaTeX-native placeholder so compilation can't
+  // fail on a missing file.
+  const step = keepImages ? String(source || '') : replaceExternalImageIncludes(source);
+  return ensureGraphicx(fixTikzArrowTips(step));
+}
+
+// Load graphicx when an \includegraphics survives, so the image figure compiles.
+function ensureGraphicx(source) {
+  let out = String(source || '');
+
+  if (/\\includegraphics/.test(out) && !/\\usepackage(?:\[[^\]]*\])?\{graphicx\}/.test(out) && /\\begin\{document\}/.test(out)) {
+    out = out.replace(/(\\begin\{document\})/, '\\usepackage{graphicx}\n$1');
+  }
+
+  return out;
 }
 
 // Safety net for model-generated TikZ: the deprecated `arrows` library tips

@@ -2,7 +2,7 @@ import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
 import { proposalLatexToPdf } from './pdfExport.js';
-import { answerAgentQuestion, generateProposal, startAgentSession } from './proposalGenerator.js';
+import { answerAgentQuestion, generateProposal, reviewProposal, startAgentSession, suggestFigure } from './proposalGenerator.js';
 import { searchPapers } from './literature.js';
 
 const app = express();
@@ -73,6 +73,42 @@ app.post('/api/proposal', async (request, response) => {
   }
 });
 
+app.post('/api/review', async (request, response) => {
+  try {
+    const payload = request.body || {};
+
+    if (!String(payload.proposalLatex || '').trim()) {
+      response.status(400).json({ error: 'proposalLatex is required.' });
+      return;
+    }
+
+    response.json(await reviewProposal(payload));
+  } catch (error) {
+    response.status(500).json({
+      error: 'Review failed.',
+      detail: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post('/api/figure/suggest', async (request, response) => {
+  try {
+    const payload = request.body || {};
+
+    if (!String(payload.topic || payload.title || '').trim()) {
+      response.status(400).json({ error: 'A topic or title is required.' });
+      return;
+    }
+
+    response.json(await suggestFigure(payload));
+  } catch (error) {
+    response.status(500).json({
+      error: 'Figure suggestion failed.',
+      detail: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 app.post('/api/literature/search', async (request, response) => {
   try {
     const query = String(request.body?.query || '').trim();
@@ -102,7 +138,7 @@ app.post('/api/export/pdf', async (request, response) => {
     }
 
     const title = String(payload.title || 'proposal').trim();
-    const pdf = await proposalLatexToPdf(latex, title);
+    const pdf = await proposalLatexToPdf(latex, title, payload.figureImages || []);
 
     response.setHeader('Content-Type', 'application/pdf');
     response.setHeader('Content-Disposition', 'attachment; filename="proposal.pdf"');

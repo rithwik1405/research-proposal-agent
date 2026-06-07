@@ -86,7 +86,9 @@ Game state $\\rightarrow$ Agent action $\\rightarrow$ Data log $\\rightarrow$ Bu
 - Do not invent citations. Use source notes or assumptions when sources are missing.
 - If the input includes a "sources" list, treat those as the real literature for this proposal: the References section MUST list those sources (author, year, title), and the related-work and novelty discussion MUST cite them inline. Do NOT list "course requirements", "provided demo workflow", or the assignment itself as references. Do not invent citations beyond the provided sources; for any other claim, use source notes or assumptions.
 - If no sources are provided, keep a brief References/source-notes section and clearly mark unsupported claims as assumptions.
-- If "revisionNotes" are provided, treat them as the author's revision instructions for this draft and apply them directly (e.g., tighten scope, sharpen the research question, add a baseline).`;
+- If "revisionNotes" are provided, treat them as the author's revision instructions for this draft and apply them directly (e.g., tighten scope, sharpen the research question, add a baseline).
+- Do not use placeholder text, square brackets, "TODO", "lorem", or generic filler. Every section must contain concrete, specific content about this project's actual topic — named methods, metrics, datasets, and realistic milestones, not vague boilerplate.
+- If a "figures" array is provided in the input, include EACH figure's "latex" VERBATIM in the proposal (in order, in sensible Figure sections) — they are already compile-safe. Do NOT redesign them or invent additional figures beyond the ones provided.`;
 
 const QUESTION_SYSTEM_PROMPT = `You are running an interactive proposal-agent workflow.
 
@@ -136,7 +138,162 @@ Return strict JSON:
   "updates": ["short state update"]
 }
 
+Rules:
+- Provide a fieldSuggestion for EVERY field: title, problem, method, timeline, evaluation, resources, references (skip references only if the user will supply papers).
+- Ground every suggestion in the user's ACTUAL research idea. Write real, specific proposal content for that topic — concrete problems, methods, metrics, milestones, and tools that fit it.
+- Never output placeholders, square brackets, "TODO", "e.g. ...", "lorem", or generic meta text such as "students need help turning ideas into proposals". Each value must read like real proposal content a reviewer would accept.
+- Prefer specific nouns and numbers (named techniques, datasets, metrics, phase durations) over vague phrasing.
+- Provide 2-3 decisions that are REAL trade-offs for THIS research idea — competing methods/algorithms, target domains or datasets, scope choices, or evaluation strategies specific to the topic. Each option's "value" must be concrete content tailored to the idea (e.g., for game-testing AI: "Deep Q-Network" vs "PPO" vs "evolutionary search"). Never produce generic decisions about "the proposal workflow", "the demo", "rubric alignment", or "student ownership".
+
 First infer concrete proposal data from the rough idea. Give the user suggested data and selectable options before asking open-ended questions. Ask open-ended questions only for information that cannot be reasonably inferred.`;
+
+const FIGURE_SYSTEM_PROMPT = `You design ONE compile-safe LaTeX figure for a CS research proposal.
+
+Return only a single LaTeX figure environment inside a latex code block:
+\`\`\`latex
+\\begin{figure}[h]
+\\centering
+\\begin{tabular}{|c|}
+\\hline
+concise diagram of the proposed method or workflow using text and $\\rightarrow$ arrows \\\\
+\\hline
+\\end{tabular}
+\\caption{One concrete sentence describing what the figure shows.}
+\\end{figure}
+\`\`\`
+
+Rules:
+- The figure must depict THIS project's specific method, workflow, or architecture — not a generic diagram.
+- Use ONLY \\centering, tabular, itemize, and text arrows ($\\rightarrow$). Never use TikZ, pgf, \\begin{center}, minipage, or \\includegraphics.
+- Every \\begin{X} has a matching \\end{X}. Keep it simple so it compiles on the first try.
+- Always include a concrete \\caption.`;
+
+export async function suggestFigure(payload) {
+  const project = normalizePayload(payload);
+  const focus = clean(payload.input);
+
+  if (process.env.LLM_API_KEY && process.env.LLM_API_URL) {
+    const model = clean(process.env.LLM_MODEL);
+
+    if (!model) {
+      throw new Error('LLM_MODEL is required when LLM_API_KEY and LLM_API_URL are configured.');
+    }
+
+    const content = await callModel({
+      systemPrompt: FIGURE_SYSTEM_PROMPT,
+      payload: {
+        topic: project.topic || project.title,
+        problem: project.problem,
+        method: project.method,
+        focus
+      },
+      model,
+      temperature: 0.3,
+      jsonMode: false
+    });
+
+    const latex = extractFencedBlock(clean(content), ['latex', 'tex']);
+    const figureLatex = /\\begin\{figure\}/.test(latex) ? latex : buildLocalFigure(project);
+
+    return { mode: 'api', latex: figureLatex, caption: extractCaption(figureLatex) };
+  }
+
+  const figureLatex = buildLocalFigure(project);
+  return { mode: 'local-fallback', latex: figureLatex, caption: extractCaption(figureLatex) };
+}
+
+function buildLocalFigure(project) {
+  const topic = project.title || project.topic || 'the proposed system';
+  return String.raw`\begin{figure}[h]
+\centering
+\begin{tabular}{|c|}
+\hline
+Input $\rightarrow$ Agent action $\rightarrow$ Data log $\rightarrow$ Analysis $\rightarrow$ Report \\
+\hline
+\end{tabular}
+\caption{High-level workflow of ${escapeLatex(topic)}.}
+\end{figure}`;
+}
+
+function extractCaption(latex) {
+  const match = String(latex || '').match(/\\caption\{([^}]*)\}/);
+  return match?.[1]?.trim() || '';
+}
+
+const REVIEWER_SYSTEM_PROMPT = `You are an independent, strict grant reviewer (NSF-style) evaluating a research proposal you did NOT write. Judge it on its merits and be discerning.
+
+Return strict JSON:
+{
+  "reviewerScore": {
+    "overall": 3.5,
+    "criteria": [
+      { "name": "Significance", "score": 4, "comment": "one concise sentence" },
+      { "name": "Approach", "score": 3, "comment": "one concise sentence" },
+      { "name": "Innovation", "score": 3, "comment": "one concise sentence" },
+      { "name": "Feasibility", "score": 4, "comment": "one concise sentence" }
+    ]
+  },
+  "summary": "2-4 sentence overall assessment in a reviewer's voice",
+  "suggestedEdits": [
+    { "section": "e.g. Motivation", "issue": "what is weak", "suggestion": "a concrete, specific edit to make" }
+  ]
+}
+
+Scoring: 1 = poor, 3 = acceptable, 5 = excellent. Reserve 5s for genuinely strong sections; do not inflate. overall is the mean of the four criteria, rounded to one decimal.
+Definitions: Significance = importance of the problem; Approach = soundness and clarity of method and evaluation; Innovation = novelty versus prior work; Feasibility = credible scope, milestones, and resources.
+Provide 2-5 suggestedEdits targeting the weakest parts — each concrete and actionable. Do not invent edits for sections that are already strong.`;
+
+function normalizeSuggestedEdits(edits) {
+  if (!Array.isArray(edits)) return [];
+
+  return edits
+    .map((edit) => ({
+      section: clean(edit?.section) || 'General',
+      issue: clean(edit?.issue),
+      suggestion: clean(edit?.suggestion)
+    }))
+    .filter((edit) => edit.suggestion)
+    .slice(0, 6);
+}
+
+export async function reviewProposal(payload) {
+  const proposal = clean(payload.proposalLatex);
+  const checklist = extractChecklist(clean(payload.requirements) || DEFAULT_REQUIREMENTS);
+
+  if (!proposal) {
+    throw new Error('proposalLatex is required for review.');
+  }
+
+  const cfg = reviewLlmConfig();
+
+  if (cfg.apiKey && cfg.apiUrl && cfg.model) {
+    const content = await callModel({
+      systemPrompt: REVIEWER_SYSTEM_PROMPT,
+      payload: { proposal: proposal.slice(0, 16000), checklist },
+      model: cfg.model,
+      temperature: 0.2,
+      jsonMode: true,
+      config: cfg
+    });
+    const parsed = parseJsonContent(content);
+
+    return {
+      mode: 'api',
+      model: cfg.model,
+      reviewerScore: normalizeReviewerScore(parsed.reviewerScore, []),
+      summary: clean(parsed.summary) || 'No summary returned.',
+      suggestedEdits: normalizeSuggestedEdits(parsed.suggestedEdits)
+    };
+  }
+
+  return {
+    mode: 'local-fallback',
+    model: 'template',
+    reviewerScore: normalizeReviewerScore(null, []),
+    summary: 'Configure an LLM API key to get independent reviewer feedback.',
+    suggestedEdits: []
+  };
+}
 
 export async function startAgentSession(payload) {
   const project = normalizePayload(payload);
@@ -234,12 +391,25 @@ export async function generateProposal(payload) {
   const checklist = extractChecklist(requirements);
   const sources = normalizeSources(payload.sources);
   const notes = clean(payload.notes);
+  const figures = normalizeFigures(payload.figures);
 
   if (process.env.LLM_API_KEY && process.env.LLM_API_URL) {
-    return generateWithApi(project, checklist, sources, notes);
+    return generateWithApi(project, checklist, sources, notes, figures);
   }
 
   return generateLocally(project, checklist);
+}
+
+function normalizeFigures(figures) {
+  if (!Array.isArray(figures)) return [];
+
+  return figures
+    .map((figure) => ({
+      latex: clean(figure?.latex),
+      image: Boolean(figure?.image),
+      imageName: clean(figure?.imageName)
+    }))
+    .filter((figure) => figure.latex || figure.image);
 }
 
 // Trim user-provided sources to a small, prompt-safe shape.
@@ -292,7 +462,7 @@ async function refineProjectWithApi(payload) {
   };
 }
 
-async function generateWithApi(project, checklist, sources = [], notes = '') {
+async function generateWithApi(project, checklist, sources = [], notes = '', figures = []) {
   const model = clean(process.env.LLM_MODEL);
 
   if (!model) {
@@ -304,6 +474,7 @@ async function generateWithApi(project, checklist, sources = [], notes = '') {
     checklist,
     sources,
     revisionNotes: notes,
+    figures,
     outputContract: {
       latexBlock: 'Complete compile-ready LaTeX source for proposal.tex, in a ```latex fence',
       jsonBlock: 'A ```json fence with complianceMatrix, evaluationReport, and questions'
@@ -351,22 +522,24 @@ function hasUsableProposal(parsed) {
   return looksLikeLatex(latex) && matrixOk;
 }
 
-async function callModel({ systemPrompt, payload, model, temperature, jsonMode = true }) {
-  if (getProvider() === 'gemini') {
-    return callGemini({ systemPrompt, payload, model, temperature, jsonMode });
+async function callModel({ systemPrompt, payload, model, temperature, jsonMode = true, config = null }) {
+  const cfg = config || mainLlmConfig();
+
+  if (cfg.provider === 'gemini') {
+    return callGemini({ systemPrompt, payload, model, temperature, jsonMode, cfg });
   }
 
-  return callOpenAiCompatible({ systemPrompt, payload, model, temperature });
+  return callOpenAiCompatible({ systemPrompt, payload, model, temperature, cfg });
 }
 
-async function callGemini({ systemPrompt, payload, model, temperature, jsonMode = true }) {
-  const baseUrl = clean(process.env.LLM_API_URL) || 'https://generativelanguage.googleapis.com/v1beta';
+async function callGemini({ systemPrompt, payload, model, temperature, jsonMode = true, cfg }) {
+  const baseUrl = clean(cfg?.apiUrl) || 'https://generativelanguage.googleapis.com/v1beta';
   const endpoint = `${baseUrl.replace(/\/$/, '')}/models/${encodeURIComponent(model)}:generateContent`;
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-goog-api-key': process.env.LLM_API_KEY
+      'x-goog-api-key': cfg?.apiKey
     },
     body: JSON.stringify({
       systemInstruction: {
@@ -406,11 +579,11 @@ async function callGemini({ systemPrompt, payload, model, temperature, jsonMode 
   return content;
 }
 
-async function callOpenAiCompatible({ systemPrompt, payload, model, temperature }) {
-  const response = await fetch(process.env.LLM_API_URL, {
+async function callOpenAiCompatible({ systemPrompt, payload, model, temperature, cfg }) {
+  const response = await fetch(clean(cfg?.apiUrl), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${process.env.LLM_API_KEY}`,
+      Authorization: `Bearer ${cfg?.apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -808,11 +981,10 @@ function normalizeFieldSuggestions(suggestions, project) {
         .filter((item) => item.field && item.value)
     : [];
 
-  const fallback = buildFieldSuggestions(project);
-  const seen = new Set(parsed.map((item) => item.field));
-  const merged = [...parsed, ...fallback.filter((item) => !seen.has(item.field))];
-
-  return merged.length ? merged : fallback;
+  // Trust the model's idea-specific suggestions. Only fall back to the generic
+  // template when the model returned nothing — never pad real suggestions with
+  // boilerplate, which is what produced placeholder-y cards.
+  return parsed.length ? parsed : buildFieldSuggestions(project);
 }
 
 function normalizeDecisions(decisions, project) {
@@ -1270,15 +1442,53 @@ function escapeLatex(value) {
     .replace(/\^/g, '\\textasciicircum{}');
 }
 
-function getProvider() {
-  const provider = clean(process.env.LLM_PROVIDER).toLowerCase();
-  const url = clean(process.env.LLM_API_URL).toLowerCase();
+function providerOf(provider, url) {
+  const p = clean(provider).toLowerCase();
+  const u = clean(url).toLowerCase();
 
-  if (provider === 'gemini' || url.includes('generativelanguage.googleapis.com')) {
+  if (p === 'gemini' || u.includes('generativelanguage.googleapis.com')) {
     return 'gemini';
   }
 
   return 'openai-compatible';
+}
+
+function getProvider() {
+  return providerOf(process.env.LLM_PROVIDER, process.env.LLM_API_URL);
+}
+
+// Main LLM (generation) config from LLM_* env.
+function mainLlmConfig() {
+  return {
+    provider: getProvider(),
+    apiUrl: clean(process.env.LLM_API_URL),
+    apiKey: clean(process.env.LLM_API_KEY),
+    model: clean(process.env.LLM_MODEL)
+  };
+}
+
+// Reviewer config — a completely separate LLM (e.g. Groq/Llama or OpenAI) when
+// LLM_REVIEW_API_URL is set; otherwise the main LLM with an optional alt model.
+function reviewLlmConfig() {
+  const reviewUrl = clean(process.env.LLM_REVIEW_API_URL);
+
+  if (reviewUrl) {
+    // A different provider was specified — it must use its OWN key, never the
+    // main provider's key.
+    return {
+      provider: providerOf(process.env.LLM_REVIEW_PROVIDER, reviewUrl),
+      apiUrl: reviewUrl,
+      apiKey: clean(process.env.LLM_REVIEW_API_KEY),
+      model: clean(process.env.LLM_REVIEW_MODEL) || clean(process.env.LLM_MODEL)
+    };
+  }
+
+  return {
+    provider: getProvider(),
+    apiUrl: clean(process.env.LLM_API_URL),
+    apiKey: clean(process.env.LLM_API_KEY),
+    model: clean(process.env.LLM_REVIEW_MODEL) || clean(process.env.LLM_MODEL)
+  };
 }
 
 function titleCase(value) {

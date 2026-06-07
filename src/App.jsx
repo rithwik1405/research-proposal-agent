@@ -5,13 +5,16 @@ import {
   ClipboardCheck,
   Download,
   FileText,
+  Gauge,
+  Image as ImageIcon,
   ListChecks,
   Loader2,
   Play,
   RefreshCw,
   Send,
   Sparkles,
-  Upload
+  Upload,
+  X
 } from 'lucide-react';
 
 const DEFAULT_REQUIREMENTS = `Proposal must include:
@@ -68,6 +71,8 @@ const MEMORY_KEY = 'proposal-agent-final-project-memory-v1';
 
 const RUN_LOG_PAGE_SIZE = 6;
 
+const PAPERS_PAGE_SIZE = 4;
+
 function App() {
   const [topicInput, setTopicInput] = useState('');
   const [project, setProject] = useState(EMPTY_PROJECT);
@@ -87,7 +92,14 @@ function App() {
   const [revisionNotes, setRevisionNotes] = useState('');
   const [runLogPage, setRunLogPage] = useState(0);
   const [papers, setPapers] = useState([]);
+  const [papersPage, setPapersPage] = useState(0);
   const [sourcesBusy, setSourcesBusy] = useState('');
+  const [figures, setFigures] = useState([]);
+  const [figureInput, setFigureInput] = useState('');
+  const [figureIndex, setFigureIndex] = useState(0);
+  const [figureBusy, setFigureBusy] = useState(false);
+  const [reviewResult, setReviewResult] = useState(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const lastQueryRef = useRef('');
   const [memorySavedAt, setMemorySavedAt] = useState('');
   const [memoryReady, setMemoryReady] = useState(false);
@@ -126,6 +138,11 @@ function App() {
     setRunLogPage(Math.max(0, Math.ceil(runLog.length / RUN_LOG_PAGE_SIZE) - 1));
   }, [runLog.length]);
 
+  // Jump to the newest figure when one is added (and stay in range on removal).
+  useEffect(() => {
+    setFigureIndex(Math.max(0, figures.length - 1));
+  }, [figures.length]);
+
   // Auto-suggest related papers once the idea has a title and none are loaded yet.
   // Keyed on project.title only — typing the rough idea must not trigger searches.
   useEffect(() => {
@@ -139,6 +156,28 @@ function App() {
 
     return () => clearTimeout(handle);
   }, [project.title, papers.length]);
+
+  // Keep the "Sources" field (Accepted Project State) and the matching
+  // "Sources / Assumptions" suggestion card in sync with the checked Related
+  // Works papers, so selected papers show in both places and flow into the
+  // proposal's References.
+  useEffect(() => {
+    const selected = papers.filter((paper) => paper.selected);
+    if (!selected.length) return;
+
+    const referencesText = selected
+      .map((paper) => [paper.authors, paper.year ? `(${paper.year})` : '', paper.title].filter(Boolean).join(' '))
+      .join('; ');
+
+    setProject((current) => (current.references === referencesText ? current : { ...current, references: referencesText }));
+    setFieldSuggestions((current) =>
+      current.map((suggestion) =>
+        suggestion.field === 'references'
+          ? { ...suggestion, value: referencesText, reason: 'Built from the Related Works papers you selected.' }
+          : suggestion
+      )
+    );
+  }, [papers]);
 
   useEffect(() => {
     if (!memoryReady) return;
@@ -162,7 +201,9 @@ function App() {
     decisionIndex,
     decisionChoices,
     revisionNotes,
-    papers
+    papers,
+    figures,
+    figureInput
   ]);
 
   async function startAgent() {
@@ -248,13 +289,23 @@ function App() {
     setStatus('drafting');
     setError('');
 
+    const selectedPapers = papers.filter((paper) => paper.selected);
+    // The selected papers ARE the references. Override the project's Sources
+    // field so the proposal cites them instead of boilerplate placeholders.
+    const referencesText = selectedPapers.length
+      ? selectedPapers.map((paper) => [paper.authors, paper.year ? `(${paper.year})` : '', paper.title].filter(Boolean).join(' ')).join('; ')
+      : project.references;
+    const { figures: figurePayload, figureImages } = figuresForGeneration();
+
     try {
       const data = await postJson('/api/proposal', {
         ...project,
+        references: referencesText,
         topic: project.topic || project.title,
         requirements: DEFAULT_REQUIREMENTS,
-        sources: papers.filter((paper) => paper.selected),
-        notes: revisionNotes
+        sources: selectedPapers,
+        notes: revisionNotes,
+        figures: figurePayload
       });
 
       setResult(data);
@@ -266,7 +317,7 @@ function App() {
 
       // Compile the PDF separately so a missing LaTeX engine never discards the draft.
       try {
-        const nextPdfUrl = await exportPdfUrl(data.proposalLatex, project.title || 'proposal');
+        const nextPdfUrl = await exportPdfUrl(data.proposalLatex, project.title || 'proposal', figureImages);
         updatePdfUrl(nextPdfUrl);
         setActiveTab('pdf');
       } catch (pdfError) {
@@ -303,6 +354,7 @@ function App() {
         const merged = fetched.map((paper) => ({ ...paper, selected: previouslySelected.has(paper.id) }));
         return [...merged, ...uploads];
       });
+      setPapersPage(0);
       setRunLog((current) => [
         ...current,
         logEntry('Sources', `Suggested ${fetched.length} related paper(s) for "${query}".`)
@@ -347,6 +399,155 @@ function App() {
     } finally {
       setSourcesBusy('');
     }
+  }
+
+  // Compile a single figure's LaTeX into a small PDF for a rendered preview.
+  async function compileFigurePreview(figureLatex) {
+    const latex = (figureLatex || '').trim();
+    if (!latex) return '';
+
+    const previewDoc = `\\documentclass[11pt]{article}\n\\usepackage[margin=0.6in]{geometry}\n\\begin{document}\n\\thispagestyle{empty}\n${latex}\n\\end{document}`;
+
+    try {
+      return await exportPdfUrl(previewDoc, 'figure-preview');
+    } catch {
+      return '';
+    }
+  }
+
+  // Suggest ANOTHER figure and append it to the list (you can stack several).
+  async function suggestFigureFn() {
+    const topic = (project.topic || project.title || topicInput || '').trim();
+    if (!topic) return;
+
+    setFigureBusy(true);
+    setError('');
+
+    try {
+      const data = await postJson('/api/figure/suggest', {
+        topic,
+        title: project.title,
+        problem: project.problem,
+        method: project.method,
+        input: figureInput
+      });
+      const latex = data.latex || '';
+      const previewUrl = await compileFigurePreview(latex);
+      const newFigure = { id: `fig-${Date.now()}`, kind: 'latex', latex, caption: data.caption || '', previewUrl };
+
+      setFigures((current) => [...current, newFigure]);
+      setFigureInput('');
+      setRunLog((current) => [...current, logEntry('Figure', 'Added a suggested figure to the draft.')]);
+      clearArtifacts();
+    } catch (requestError) {
+      setError(readError(requestError));
+    } finally {
+      setFigureBusy(false);
+    }
+  }
+
+  function handleFigureImage(fileList) {
+    const file = Array.from(fileList || [])[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const extMatch = file.name.match(/\.(png|jpe?g|pdf)$/i);
+      const ext = extMatch ? extMatch[0].toLowerCase() : '.png';
+      const newFigure = {
+        id: `fig-${Date.now()}`,
+        kind: 'image',
+        imageName: `userfigure${Date.now()}${ext}`,
+        imageDataUrl: String(reader.result),
+        caption: '',
+        latex: '',
+        previewUrl: ''
+      };
+      setFigures((current) => [...current, newFigure]);
+      setRunLog((current) => [...current, logEntry('Figure', `Added your uploaded figure (${file.name}).`)]);
+      clearArtifacts();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function removeFigure(id) {
+    setFigures((current) => {
+      const target = current.find((item) => item.id === id);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return current.filter((item) => item.id !== id);
+    });
+    clearArtifacts();
+  }
+
+  async function renderFigurePreviewFor(id) {
+    setFigureBusy(true);
+    try {
+      const target = figures.find((item) => item.id === id);
+      const url = await compileFigurePreview(target?.latex || '');
+      setFigures((current) => current.map((item) => (item.id === id ? { ...item, previewUrl: url } : item)));
+    } finally {
+      setFigureBusy(false);
+    }
+  }
+
+  // Build the figures to inject into the proposal plus any image bytes to compile.
+  function figuresForGeneration() {
+    const payloadFigures = [];
+    const figureImages = [];
+
+    figures.forEach((item) => {
+      if (item.kind === 'image' && item.imageDataUrl) {
+        const caption = item.caption || 'Figure provided by the author.';
+        payloadFigures.push({
+          latex: `\\begin{figure}[h]\n\\centering\n\\includegraphics[width=0.85\\linewidth]{${item.imageName}}\n\\caption{${caption}}\n\\end{figure}`,
+          image: true,
+          imageName: item.imageName
+        });
+        figureImages.push({ name: item.imageName, base64: item.imageDataUrl });
+      } else if (item.latex) {
+        payloadFigures.push({ latex: item.latex });
+      }
+    });
+
+    return { figures: payloadFigures, figureImages };
+  }
+
+  function handleFigureImage(fileList) {
+    const file = Array.from(fileList || [])[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const extMatch = file.name.match(/\.(png|jpe?g|pdf)$/i);
+      const ext = extMatch ? extMatch[0].toLowerCase() : '.png';
+      setFigure((current) => ({ ...current, image: { name: `userfigure${ext}`, dataUrl: String(reader.result) } }));
+      setRunLog((current) => [...current, logEntry('Figure', `Uploaded your own figure (${file.name}).`)]);
+      clearArtifacts();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function clearFigureImage() {
+    setFigure((current) => ({ ...current, image: null }));
+    clearArtifacts();
+  }
+
+  // The figure to inject into the proposal, plus any image bytes for compilation.
+  function figureForGeneration() {
+    if (figure.image) {
+      const caption = figure.caption || 'Figure provided by the author.';
+      const latex = `\\begin{figure}[h]\n\\centering\n\\includegraphics[width=0.85\\linewidth]{${figure.image.name}}\n\\caption{${caption}}\n\\end{figure}`;
+      return {
+        figure: { latex, image: true, imageName: figure.image.name },
+        figureImage: { name: figure.image.name, base64: figure.image.dataUrl }
+      };
+    }
+
+    if (figure.latex) {
+      return { figure: { latex: figure.latex }, figureImage: null };
+    }
+
+    return { figure: null, figureImage: null };
   }
 
   function toggleSuggestion(suggestion) {
@@ -416,6 +617,37 @@ function App() {
   function clearArtifacts() {
     setResult(null);
     updatePdfUrl('');
+    setReviewResult(null);
+  }
+
+  async function runReview() {
+    if (!result?.proposalLatex) return;
+
+    setReviewBusy(true);
+    setError('');
+
+    try {
+      const data = await postJson('/api/review', {
+        proposalLatex: result.proposalLatex,
+        requirements: DEFAULT_REQUIREMENTS,
+        title: project.title
+      });
+      setReviewResult(data);
+      setRunLog((current) => [
+        ...current,
+        logEntry('Review', `Reviewer (${data.model}) scored the draft ${data.reviewerScore?.overall ?? '?'}/5.`)
+      ]);
+    } catch (requestError) {
+      setError(readError(requestError));
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
+  function useSuggestedEdit(edit) {
+    const note = [edit.section, edit.suggestion].filter(Boolean).join(': ');
+    setRevisionNotes(note);
+    setRunLog((current) => [...current, logEntry('Review', 'Loaded a suggested edit into revision notes.')]);
   }
 
   function updatePdfUrl(nextUrl) {
@@ -441,6 +673,10 @@ function App() {
     setDecisionChoices({});
     setRevisionNotes('');
     setPapers([]);
+    setPapersPage(0);
+    setFigures([]);
+    setFigureInput('');
+    setFigureIndex(0);
     lastQueryRef.current = '';
   }
 
@@ -462,7 +698,7 @@ function App() {
     setError('');
 
     try {
-      const href = pdfUrl || (await exportPdfUrl(result.proposalLatex, project.title || 'proposal'));
+      const href = pdfUrl || (await exportPdfUrl(result.proposalLatex, project.title || 'proposal', figuresForGeneration().figureImages));
       const anchor = document.createElement('a');
       anchor.href = href;
       anchor.download = 'proposal.pdf';
@@ -491,7 +727,9 @@ function App() {
       decisionIndex,
       decisionChoices,
       revisionNotes,
-      papers
+      papers,
+      figures: figures.filter((item) => item.kind === 'latex').map(({ id, kind, latex, caption }) => ({ id, kind, latex, caption })),
+      figureInput
     };
 
     localStorage.setItem(MEMORY_KEY, JSON.stringify(snapshot));
@@ -524,6 +762,18 @@ function App() {
       setDecisionChoices(snapshot.decisionChoices && typeof snapshot.decisionChoices === 'object' ? snapshot.decisionChoices : {});
       setRevisionNotes(snapshot.revisionNotes || '');
       setPapers(Array.isArray(snapshot.papers) ? snapshot.papers : []);
+      setFigures(
+        Array.isArray(snapshot.figures)
+          ? snapshot.figures.map((item) => ({
+              id: item.id || `fig-${Math.random().toString(16).slice(2)}`,
+              kind: 'latex',
+              latex: item.latex || '',
+              caption: item.caption || '',
+              previewUrl: ''
+            }))
+          : []
+      );
+      setFigureInput(snapshot.figureInput || '');
       setMemorySavedAt(snapshot.savedAt || '');
       setError('');
 
@@ -628,7 +878,10 @@ function App() {
 
           <RelatedWorksPanel
             papers={papers}
+            page={papersPage}
+            pageSize={PAPERS_PAGE_SIZE}
             busy={sourcesBusy}
+            onPageChange={setPapersPage}
             onToggle={togglePaper}
             onUpload={handleUpload}
             onRefresh={() => findPapers()}
@@ -705,6 +958,19 @@ function App() {
               ) : (
                 <EmptyState text="Enter a rough idea, then let the model structure it." compact />
               )}
+
+              <FigurePanel
+                figures={figures}
+                index={figures.length ? Math.min(figureIndex, figures.length - 1) : 0}
+                input={figureInput}
+                busy={figureBusy}
+                onIndexChange={setFigureIndex}
+                onInputChange={setFigureInput}
+                onSuggest={suggestFigureFn}
+                onUpload={handleFigureImage}
+                onRemove={removeFigure}
+                onRenderPreview={renderFigurePreviewFor}
+              />
             </section>
 
             <section className="workspace-panel decisions-panel">
@@ -917,7 +1183,17 @@ function App() {
                 </button>
               </div>
 
-              {renderArtifact(activeTab, result, pdfUrl)}
+              {activeTab === 'evaluation' ? (
+                <ReviewPanel
+                  result={result}
+                  review={reviewResult}
+                  busy={reviewBusy}
+                  onRun={runReview}
+                  onUseEdit={useSuggestedEdit}
+                />
+              ) : (
+                renderArtifact(activeTab, result, pdfUrl)
+              )}
             </section>
           </div>
         </section>
@@ -941,13 +1217,14 @@ async function postJson(url, body) {
   return data;
 }
 
-async function exportPdfUrl(proposalLatex, title) {
+async function exportPdfUrl(proposalLatex, title, figureImages = []) {
   const response = await fetch('/api/export/pdf', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       title,
-      proposalLatex
+      proposalLatex,
+      figureImages
     })
   });
 
@@ -1002,10 +1279,6 @@ function renderArtifact(activeTab, result, pdfUrl) {
     );
   }
 
-  if (activeTab === 'evaluation') {
-    // ReviewPanel (reviewer score) is built but parked for Stage 2.
-    return <pre>{result.evaluationReport}</pre>;
-  }
 
   return <pre className="proposal-output">{result.proposalLatex}</pre>;
 }
@@ -1028,41 +1301,72 @@ function EmptyState({ text, compact = false }) {
   );
 }
 
-function ReviewPanel({ result }) {
-  const score = result?.reviewerScore;
+function ReviewPanel({ result, review, busy, onRun, onUseEdit }) {
+  if (!result?.proposalLatex) {
+    return <EmptyState text="Generate a proposal first, then run the reviewer." />;
+  }
+
+  const score = review?.reviewerScore;
 
   return (
     <div className="review-panel">
-      {score ? (
-        <div className="score-board">
-          <div className={`score-overall ${scoreTone(score.overall)}`}>
-            <span>Reviewer Score</span>
-            <strong>
-              {score.overall}
-              <small>/5</small>
-            </strong>
-            {score.estimated ? <em>estimated from coverage</em> : null}
-          </div>
-          <div className="score-criteria">
-            {(score.criteria || []).map((criterion) => (
-              <div className="score-row" key={criterion.name}>
-                <div className="score-row-head">
+      <div className="review-toolbar">
+        <button className="primary" type="button" disabled={busy} onClick={onRun}>
+          {busy ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Gauge size={16} aria-hidden="true" />}
+          {review ? 'Re-run review' : 'Get reviewer feedback'}
+        </button>
+        {review?.model ? <span className="review-model">reviewed by {review.model}</span> : null}
+      </div>
+
+      {busy && !review ? (
+        <EmptyState text="An independent reviewer is reading your proposal…" compact />
+      ) : review ? (
+        <div className="review-result">
+          {score ? (
+            <div className={`review-score ${scoreTone(score.overall)}`}>
+              <span>Reviewer score</span>
+              <strong>{score.overall}<small> / 5</small></strong>
+            </div>
+          ) : null}
+
+          {score?.criteria?.length ? (
+            <ul className="review-criteria">
+              {score.criteria.map((criterion) => (
+                <li key={criterion.name}>
                   <span>{criterion.name}</span>
                   <strong>{criterion.score}/5</strong>
+                  {criterion.comment ? <small>{criterion.comment}</small> : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {review.summary ? (
+            <div className="review-feedback">
+              <h3>Feedback</h3>
+              <p>{review.summary}</p>
+            </div>
+          ) : null}
+
+          {review.suggestedEdits?.length ? (
+            <div className="review-edits">
+              <h3>Suggested edits</h3>
+              {review.suggestedEdits.map((edit, index) => (
+                <div className="edit-card" key={index}>
+                  <strong>{edit.section}</strong>
+                  {edit.issue ? <small>{edit.issue}</small> : null}
+                  <p>{edit.suggestion}</p>
+                  <button className="secondary" type="button" onClick={() => onUseEdit(edit)}>
+                    Use as revision note
+                  </button>
                 </div>
-                <div className="score-bar">
-                  <span
-                    className={scoreTone(criterion.score)}
-                    style={{ width: `${(Number(criterion.score) / 5) * 100}%` }}
-                  />
-                </div>
-                {criterion.comment ? <small>{criterion.comment}</small> : null}
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          ) : null}
         </div>
-      ) : null}
-      <pre>{result.evaluationReport}</pre>
+      ) : (
+        <EmptyState text="Click “Get reviewer feedback” — a separate LLM will score and critique this draft." compact />
+      )}
     </div>
   );
 }
@@ -1074,9 +1378,12 @@ function scoreTone(value) {
   return 'tone-weak';
 }
 
-function RelatedWorksPanel({ papers, busy, onToggle, onUpload, onRefresh }) {
+function RelatedWorksPanel({ papers, page, pageSize, busy, onPageChange, onToggle, onUpload, onRefresh }) {
   const selectedCount = papers.filter((paper) => paper.selected).length;
   const searching = busy === 'searching';
+  const totalPages = Math.max(1, Math.ceil(papers.length / pageSize));
+  const safePage = Math.min(page, totalPages - 1);
+  const visiblePapers = papers.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
   return (
     <section className="related-works">
@@ -1115,8 +1422,9 @@ function RelatedWorksPanel({ papers, busy, onToggle, onUpload, onRefresh }) {
       {searching && !papers.length ? (
         <EmptyState text="Finding related papers for your topic…" compact />
       ) : papers.length ? (
-        <ul className="paper-grid">
-          {papers.map((paper) => (
+        <>
+          <ul className="paper-grid">
+          {visiblePapers.map((paper) => (
             <li key={paper.id} className={paper.selected ? 'paper-card checked' : 'paper-card'}>
               <label className="paper-check">
                 <input type="checkbox" checked={paper.selected} onChange={() => onToggle(paper.id)} />
@@ -1137,9 +1445,131 @@ function RelatedWorksPanel({ papers, busy, onToggle, onUpload, onRefresh }) {
               </label>
             </li>
           ))}
-        </ul>
+          </ul>
+          {totalPages > 1 ? (
+            <div className="deck-nav">
+              <button className="secondary" type="button" disabled={safePage === 0} onClick={() => onPageChange(safePage - 1)}>
+                Previous
+              </button>
+              <span>{safePage + 1} / {totalPages}</span>
+              <button
+                className="secondary"
+                type="button"
+                disabled={safePage >= totalPages - 1}
+                onClick={() => onPageChange(safePage + 1)}
+              >
+                Next
+              </button>
+            </div>
+          ) : null}
+        </>
       ) : (
         <EmptyState text="Related papers appear here once your idea has a title. Use Refresh to fetch, or upload your own." compact />
+      )}
+    </section>
+  );
+}
+
+function FigurePanel({ figures, index, input, busy, onIndexChange, onInputChange, onSuggest, onUpload, onRemove, onRenderPreview }) {
+  return (
+    <section className="figure-panel">
+      <div className="panel-header">
+        <h2>
+          <ImageIcon size={16} aria-hidden="true" /> Figures
+        </h2>
+        <span>{figures.length} in draft</span>
+      </div>
+      <p className="related-hint">
+        Suggest figures for the draft (add as many as you need, with optional guidance), or upload your own images. Every figure here
+        goes into the proposal.
+      </p>
+
+      <div className="figure-actions">
+        <input
+          value={input}
+          onChange={(event) => onInputChange(event.target.value)}
+          placeholder="Optional: what the next figure should show"
+        />
+        <div className="figure-buttons">
+          <button className="primary" type="button" disabled={busy} onClick={onSuggest}>
+            {busy ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}
+            {figures.length ? 'Suggest another' : 'Suggest figure'}
+          </button>
+          <label className="secondary upload-btn">
+            <Upload size={16} aria-hidden="true" />
+            Upload image
+            <input
+              type="file"
+              accept=".png,.jpg,.jpeg,.pdf"
+              hidden
+              onChange={(event) => {
+                onUpload(event.target.files);
+                event.target.value = '';
+              }}
+            />
+          </label>
+        </div>
+      </div>
+
+      {figures.length ? (
+        (() => {
+          const item = figures[index];
+          if (!item) return null;
+          return (
+            <div className="figure-deck">
+              <div className="deck-progress">
+                <span>{index + 1} / {figures.length}</span>
+                <strong>{item.kind === 'image' ? 'uploaded' : 'AI suggested'}</strong>
+              </div>
+              <article className="figure-card">
+                <div className="figure-card-head">
+                  <strong>Figure {index + 1}</strong>
+                  <button className="icon-x" type="button" aria-label="Remove figure" onClick={() => onRemove(item.id)}>
+                    <X size={14} aria-hidden="true" />
+                  </button>
+                </div>
+                {item.caption ? <small>{item.caption}</small> : null}
+                {item.kind === 'image' ? (
+                  item.imageName.endsWith('.pdf') ? (
+                    <p className="figure-pdf-note">PDF figure attached.</p>
+                  ) : (
+                    <img className="figure-thumb" src={item.imageDataUrl} alt={`Figure ${index + 1}`} />
+                  )
+                ) : item.previewUrl ? (
+                  <iframe className="figure-preview-frame" src={item.previewUrl} title={`Figure ${index + 1} preview`} />
+                ) : (
+                  <button className="secondary" type="button" disabled={busy} onClick={() => onRenderPreview(item.id)}>
+                    {busy ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <ImageIcon size={16} aria-hidden="true" />}
+                    Render preview
+                  </button>
+                )}
+                {item.kind === 'latex' ? (
+                  <details className="figure-code">
+                    <summary>Show LaTeX</summary>
+                    <pre>{item.latex}</pre>
+                  </details>
+                ) : null}
+              </article>
+              {figures.length > 1 ? (
+                <div className="deck-nav">
+                  <button className="secondary" type="button" disabled={index === 0} onClick={() => onIndexChange(index - 1)}>
+                    Previous
+                  </button>
+                  <button
+                    className="secondary"
+                    type="button"
+                    disabled={index >= figures.length - 1}
+                    onClick={() => onIndexChange(index + 1)}
+                  >
+                    Next
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          );
+        })()
+      ) : (
+        <EmptyState text="No figures yet. Click Suggest figure (uses your topic), or upload your own image." compact />
       )}
     </section>
   );
