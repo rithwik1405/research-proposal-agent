@@ -36,9 +36,9 @@ export async function searchPapers(query, limit = 8) {
   return works
     .map((work) => ({
       id: clean(work.id) || clean(work.doi) || clean(work.title),
-      title: decodeEntities(work.title),
+      title: sanitizeText(decodeEntities(work.title)),
       authors: (work.authorships || [])
-        .map((authorship) => decodeEntities(authorship?.author?.display_name))
+        .map((authorship) => sanitizeText(decodeEntities(authorship?.author?.display_name)))
         .filter(Boolean)
         .slice(0, 6)
         .join(', '),
@@ -60,6 +60,19 @@ function decodeEntities(value) {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
+}
+
+// Clean corrupted / unrenderable text from the paper database: keep only
+// ASCII-printable plus accented Latin (U+00C0-U+024F, so names like Gutierrez
+// survive), dropping control/replacement chars and non-Latin scripts the PDF
+// font can't render; then collapse absurd repeated-character runs (corruption,
+// e.g. a Greek letter followed by 16 f's).
+function sanitizeText(value) {
+  return clean(value)
+    .replace(/[^ -~À-ɏ]/g, '')
+    .replace(/(\S)\1{3,}/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function sleep(ms) {

@@ -71,7 +71,40 @@ function sanitizeLatexForExport(source, { keepImages = false } = {}) {
   // otherwise replace it with a LaTeX-native placeholder so compilation can't
   // fail on a missing file.
   const step = keepImages ? String(source || '') : replaceExternalImageIncludes(source);
-  return ensureGraphicx(fixTikzArrowTips(step));
+  return enforceCompactLayout(ensureGraphicx(fixEnvironmentCase(fixTikzArrowTips(step))));
+}
+
+// Force a dense layout (10pt, 0.9in margins) regardless of what the model
+// emitted, so the proposal reliably fits the page budget.
+function enforceCompactLayout(source) {
+  let out = String(source || '');
+
+  out = out.replace(/\\documentclass(?:\[[^\]]*\])?\{article\}/, '\\documentclass[10pt]{article}');
+
+  if (/\\usepackage(?:\[[^\]]*\])?\{geometry\}/.test(out)) {
+    out = out.replace(/\\usepackage(?:\[[^\]]*\])?\{geometry\}/, '\\usepackage[margin=0.9in]{geometry}');
+  } else if (/\\begin\{document\}/.test(out)) {
+    out = out.replace(/(\\begin\{document\})/, '\\usepackage[margin=0.9in]{geometry}\n$1');
+  }
+
+  return out;
+}
+
+// Standard LaTeX environments are lowercase and case-sensitive. The model
+// sometimes mismatches case (e.g. \begin{abstract} ... \end{Abstract}), which
+// breaks compilation — normalize them to lowercase in both \begin and \end.
+function fixEnvironmentCase(source) {
+  const standard = new Set([
+    'document', 'abstract', 'figure', 'figure*', 'table', 'table*', 'tabular', 'tabularx',
+    'itemize', 'enumerate', 'description', 'center', 'flushleft', 'flushright', 'minipage',
+    'equation', 'equation*', 'align', 'align*', 'quote', 'quotation', 'verbatim', 'array',
+    'thebibliography', 'list'
+  ]);
+
+  return String(source || '').replace(/\\(begin|end)\{([A-Za-z*]+)\}/g, (match, command, name) => {
+    const lower = name.toLowerCase();
+    return standard.has(lower) ? `\\${command}{${lower}}` : match;
+  });
 }
 
 // Load graphicx when an \includegraphics survives, so the image figure compiles.

@@ -1,16 +1,18 @@
 const DEFAULT_REQUIREMENTS = `Proposal must include:
 - Project title
 - Abstract
-- Motivation and gap
-- Project goal
-- Method or agent workflow
+- Motivation and significance (plain language; why it matters and why now)
+- Research gap and specific objectives/aims with concrete outcomes
+- Method or approach tied to each objective
 - Figure or diagram with caption
-- Expected results
+- Expected results and a clear endpoint within the timeline
 - Research milestones with timeline estimates
-- Evaluation plan
+- Evaluation plan with measurable criteria
+- Intellectual Merit (how it advances knowledge; what is creative/original/transformative)
+- Broader Impacts (benefits beyond the field: education, broadening participation, societal benefit, or open tools/data)
 - Risks and mitigation
-- Resources or budget
-- References, assumptions, or source notes`;
+- Resources (key tools, datasets, mentors)
+- References grounded in real prior work`;
 
 const EMPTY_PROJECT_FOR_SERVER = {
   title: '',
@@ -64,7 +66,7 @@ The json block must be small and must not contain LaTeX. Keep the two blocks sep
 
 Rules:
 - The proposal artifact must be LaTeX, not Markdown.
-- Return a complete LaTeX document with \\documentclass[11pt]{article}, 1-inch margins, title, sections, and bibliography/source notes.
+- Return a complete LaTeX document with \\documentclass[10pt]{article}, 0.9-inch margins, title, sections, and bibliography/source notes.
 - Use compile-safe LaTeX. Avoid minted, shell-escape, external images, custom fonts, or packages that require extra system tools.
 - Do not use \\includegraphics or external image files. Do not use TikZ, pgf, or pstricks. Do not use the \\begin{center}...\\end{center} environment or \\begin{minipage} — these cause nesting errors.
 - Build the figure with EXACTLY this safe, balanced pattern (use \\centering, a tabular, and a caption — nothing nested):
@@ -77,17 +79,29 @@ Game state $\\rightarrow$ Agent action $\\rightarrow$ Data log $\\rightarrow$ Bu
 \\end{tabular}
 \\caption{Workflow of the proposed agent.}
 \\end{figure}
-- CRITICAL: every \\begin{X} must have a matching \\end{X} in the correct order. Never close one environment with another's \\end. Keep LaTeX simple so it compiles on the first try.
+- CRITICAL: every \\begin{X} must have a matching \\end{X} in the correct order (same name and case). Never close one environment with another's \\end. Keep LaTeX simple so it compiles on the first try.
+- Escape special characters in body text: write \\_ \\& \\# \\% (never bare _ & # %), and put any math, subscripts, or symbols inside $...$ (e.g. $x_1$, $\\geq 90\\%$). A bare _ or ^ in text causes a "Missing $" error.
 - Write the final artifact as a research proposal, not as a short course implementation report.
 - Keep the proposed research plan credible, appropriately scoped, and supported by milestones, resources, risks, and evaluation criteria.
 - Mark unsupported claims as assumptions.
 - Include a concrete agent workflow when the method involves an agent.
 - Include at least one LaTeX-native figure, diagram, workflow chart, or architecture sketch with a caption.
 - Do not invent citations. Use source notes or assumptions when sources are missing.
-- If the input includes a "sources" list, treat those as the real literature for this proposal: the References section MUST list those sources (author, year, title), and the related-work and novelty discussion MUST cite them inline. Do NOT list "course requirements", "provided demo workflow", or the assignment itself as references. Do not invent citations beyond the provided sources; for any other claim, use source notes or assumptions.
+- If the input includes a "sources" list, treat those as the real literature for this proposal: the References section MUST list those sources and the related-work/novelty discussion MUST cite them inline. Each reference uses ONLY the author, year, and title given — do NOT add or invent journal names, venues, conference names, volume/issue numbers, page ranges, or DOIs (you do not have that data, so anything you add would be fabricated). Keep each reference to one line. Do NOT list "course requirements", "provided demo workflow", or the assignment itself as references, and do not invent citations beyond the provided sources.
 - If no sources are provided, keep a brief References/source-notes section and clearly mark unsupported claims as assumptions.
 - If "revisionNotes" are provided, treat them as the author's revision instructions for this draft and apply them directly (e.g., tighten scope, sharpen the research question, add a baseline).
 - Do not use placeholder text, square brackets, "TODO", "lorem", or generic filler. Every section must contain concrete, specific content about this project's actual topic — named methods, metrics, datasets, and realistic milestones, not vague boilerplate.
+- NEVER fabricate specific people, advisor or mentor names, institutions, lab names, grant numbers, or affiliations. Refer to roles generically (e.g., "a faculty advisor with reinforcement-learning expertise") and leave real names for the author to fill in.
+- LENGTH LIMIT (hard): the entire proposal INCLUDING references MUST NOT exceed 4 pages; aim for 3. Keep total prose to ~1100-1500 words. Abstract <= 100 words. Use FEW sections and merge related ones to avoid header overhead: put the workflow figure inside Methodology, combine Expected Results with Milestones, and fold Intellectual Merit into Related Work. Each section is 1-2 SHORT paragraphs OR a brief list, never both. Caps: <=3 objectives, <=4 milestones, <=5 evaluation metrics, <=3 risks. Cut aggressively rather than exceed the limit.
+- Keep the layout compact so it fits the page budget: use \\documentclass[10pt]{article} with \\usepackage[margin=0.9in]{geometry}, add \\setlength{\\parskip}{2pt} and \\setlength{\\parindent}{0pt}, and load \\usepackage{enumitem} with \\setlist{nosep} so lists and spacing stay tight.
+
+Write to NSF GRFP standards (a strong fellowship research proposal):
+- Open with a compelling, PLAIN-LANGUAGE motivation an interdisciplinary reviewer outside the subfield can follow — no unexplained jargon. Make the research question explicit, not implied.
+- State 2-3 specific objectives/aims, each with a CONCRETE outcome (what will be discovered, built, or measured) and a clear endpoint feasible within the timeline. Tie the method directly to these objectives.
+- Include an explicit "Intellectual Merit" section: how the work advances knowledge and what is creative, original, or transformative versus prior work.
+- Include an explicit "Broader Impacts" section using real NSF-style categories (education/teaching, broadening participation, societal or economic benefit, open-source tools or datasets). Do not invent vague impacts.
+- Be persuasive and concise: every sentence should earn its place; favor specific nouns and numbers over adjectives. Prioritize the panel UNDERSTANDING the work over showing off citations.
+- Ground novelty and related work in the provided sources rather than generic claims.
 - If a "figures" array is provided in the input, include EACH figure's "latex" VERBATIM in the proposal (in order, in sensible Figure sections) — they are already compile-safe. Do NOT redesign them or invent additional figures beyond the ones provided.`;
 
 const QUESTION_SYSTEM_PROMPT = `You are running an interactive proposal-agent workflow.
@@ -254,6 +268,41 @@ function normalizeSuggestedEdits(edits) {
     }))
     .filter((edit) => edit.suggestion)
     .slice(0, 6);
+}
+
+const REPAIR_SYSTEM_PROMPT = `You fix LaTeX that failed to compile. Return ONLY the corrected, complete LaTeX document inside a latex code block — no explanation.
+
+Keep the content and structure identical; change ONLY what breaks compilation:
+- Escape stray special characters in text (\\_ \\& \\# \\%) and wrap any math, subscripts, or symbols in $...$.
+- Make every \\begin{env} match its \\end{env} (same name and case), correctly nested and balanced.
+- Remove TikZ, pgf, pstricks, \\begin{center}, and \\begin{minipage}; keep any figure as a simple figure + \\centering + tabular + \\caption.
+- Do not reference image files with \\includegraphics unless they already appear in the document.
+
+Return the full document from \\documentclass to \\end{document} in one latex code block.`;
+
+export async function repairProposalLatex(payload) {
+  const proposalLatex = clean(payload.proposalLatex);
+  const errorText = clean(payload.error).slice(0, 1500);
+
+  if (!proposalLatex) {
+    throw new Error('proposalLatex is required for repair.');
+  }
+
+  if (!(process.env.LLM_API_KEY && process.env.LLM_API_URL)) {
+    return { proposalLatex };
+  }
+
+  const model = clean(process.env.LLM_MODEL);
+  const content = await callModel({
+    systemPrompt: REPAIR_SYSTEM_PROMPT,
+    payload: { compilerError: errorText, latex: proposalLatex },
+    model,
+    temperature: 0.1,
+    jsonMode: false
+  });
+  const fixed = extractFencedBlock(clean(content), ['latex', 'tex']);
+
+  return { proposalLatex: looksLikeLatex(fixed) ? fixed : proposalLatex };
 }
 
 export async function reviewProposal(payload) {

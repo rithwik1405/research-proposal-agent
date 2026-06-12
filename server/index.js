@@ -2,7 +2,7 @@ import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
 import { proposalLatexToPdf } from './pdfExport.js';
-import { answerAgentQuestion, generateProposal, reviewProposal, startAgentSession, suggestFigure } from './proposalGenerator.js';
+import { answerAgentQuestion, generateProposal, repairProposalLatex, reviewProposal, startAgentSession, suggestFigure } from './proposalGenerator.js';
 import { searchPapers } from './literature.js';
 
 const app = express();
@@ -68,6 +68,22 @@ app.post('/api/proposal', async (request, response) => {
   } catch (error) {
     response.status(500).json({
       error: 'Proposal generation failed.',
+      detail: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post('/api/repair', async (request, response) => {
+  try {
+    if (!String(request.body?.proposalLatex || '').trim()) {
+      response.status(400).json({ error: 'proposalLatex is required.' });
+      return;
+    }
+
+    response.json(await repairProposalLatex(request.body));
+  } catch (error) {
+    response.status(500).json({
+      error: 'Repair failed.',
       detail: error instanceof Error ? error.message : String(error)
     });
   }

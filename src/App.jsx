@@ -20,16 +20,18 @@ import {
 const DEFAULT_REQUIREMENTS = `Proposal must include:
 - Project title
 - Abstract
-- Motivation and gap
-- Project goal
-- Method or agent workflow
+- Motivation and significance (plain language; why it matters and why now)
+- Research gap and specific objectives/aims with concrete outcomes
+- Method or approach tied to each objective
 - Figure or diagram with caption
-- Expected results
+- Expected results and a clear endpoint within the timeline
 - Research milestones with timeline estimates
-- Evaluation plan
+- Evaluation plan with measurable criteria
+- Intellectual Merit (how it advances knowledge; what is creative/original/transformative)
+- Broader Impacts (benefits beyond the field: education, broadening participation, societal benefit, or open tools/data)
 - Risks and mitigation
-- Resources or budget
-- References, assumptions, or source notes`;
+- Resources (key tools, datasets, mentors)
+- References grounded in real prior work`;
 
 const EMPTY_PROJECT = {
   title: '',
@@ -321,12 +323,29 @@ function App() {
         updatePdfUrl(nextPdfUrl);
         setActiveTab('pdf');
       } catch (pdfError) {
-        updatePdfUrl('');
-        setActiveTab('latex');
-        setRunLog((current) => [
-          ...current,
-          logEntry('Export', `Draft ready, but PDF compile failed: ${summarizePdfError(pdfError)} Open the LaTeX tab or download .tex.`)
-        ]);
+        // Auto-repair: send the broken LaTeX + error back to the model, then recompile once.
+        try {
+          const repaired = await postJson('/api/repair', {
+            proposalLatex: data.proposalLatex,
+            error: readError(pdfError)
+          });
+          const fixedLatex = repaired.proposalLatex || data.proposalLatex;
+          const nextPdfUrl = await exportPdfUrl(fixedLatex, project.title || 'proposal', figureImages);
+          setResult((current) => (current ? { ...current, proposalLatex: fixedLatex } : current));
+          updatePdfUrl(nextPdfUrl);
+          setActiveTab('pdf');
+          setRunLog((current) => [
+            ...current,
+            logEntry('Export', 'First compile failed — auto-repaired the LaTeX and recompiled successfully.')
+          ]);
+        } catch (repairError) {
+          updatePdfUrl('');
+          setActiveTab('latex');
+          setRunLog((current) => [
+            ...current,
+            logEntry('Export', `Draft ready, but PDF compile failed: ${summarizePdfError(repairError)} Open the LaTeX tab or download .tex.`)
+          ]);
+        }
       }
     } catch (requestError) {
       setError(readError(requestError));
