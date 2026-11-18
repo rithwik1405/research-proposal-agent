@@ -1,165 +1,123 @@
-# Three-Stage Final Project: Research Proposal Agent
+# Research Mentor
 
-## Goal
+A local web app that turns a rough CS research idea into a reviewed, compile-ready LaTeX proposal PDF.
 
-Build and evaluate a research proposal workflow. The project is not just about producing one polished PDF. It asks you to show that you understand how strong proposals are written, how an agent can support that process, and how the final proposal can be evaluated.
+## Overview
 
-You will complete the final project in three stages:
+Writing a research proposal means structuring a vague idea into problem, method, timeline, evaluation, and references, then checking that the draft actually covers those pieces. Research Mentor walks through that workflow in the browser: it structures the idea, lets you accept or override decisions, pulls real papers from OpenAlex, drafts LaTeX, compiles a PDF, and can run a second LLM as an independent reviewer.
 
-1. **Stage 1: Initial Agent + Workflow Design**
-   - Build an initial agent or prototype through vibe coding.
-   - Research proposal-writing guides, examples, and agent workflow patterns.
-   - Submit a 5-minute presentation video of your workflow design.
-   - Attend the mandatory in-person presentation session to show your motivation, idea, and goal.
-   - A polished proposal is not required in this stage.
+## How it works
 
-2. **Stage 2: Refined Agent + Workflow Usage**
-   - Refine the Stage 1 agent or workflow.
-   - Show how the agent/workflow is used to generate, revise, and evaluate proposal content.
-   - Submit usage evidence such as logs, transcripts, screenshots, and review artifacts.
+```mermaid
+flowchart LR
+  A[Rough idea] --> B[Express API]
+  B --> C{LLM configured?}
+  C -->|yes| D[Gemini / OpenAI-compatible]
+  C -->|no| E[Local template fallback]
+  D --> F[Structured fields + decisions]
+  E --> F
+  F --> G[React UI: accept / edit]
+  G --> H[OpenAlex related works]
+  G --> I[Figure suggest / upload]
+  G --> J[Proposal draft]
+  J --> K[Compliance matrix + review]
+  J --> L[Tectonic PDF export]
+  L -->|compile fails| M[LaTeX auto-repair]
+  M --> L
+```
 
-3. **Stage 3: Final Proposal**
-   - Submit the final `proposal.pdf`.
-   - The proposal is graded separately for research proposal quality.
-   - The proposal should not be framed as a short course implementation report; the course deadline and the proposed research timeline are separate.
+1. Enter a rough idea. `POST /api/agent/start` returns suggested fields and decision cards (LLM or local fallback).
+2. Accept, skip, or edit suggestions; selected OpenAlex papers become the references list.
+3. Optionally add LaTeX figures or uploaded images.
+4. `POST /api/proposal` returns LaTeX, a requirement compliance matrix, and an evaluation report.
+5. `POST /api/export/pdf` compiles with Tectonic; on failure the client can call `POST /api/repair` and retry.
+6. `POST /api/review` can score the draft with a separate reviewer model when configured.
 
-If you use vibe coding only to directly produce a proposal, you can receive Stage 3 proposal credit. However, Stage 2 credit requires evidence that your own workflow or agent guided the proposal creation process.
+## What it does
 
-## Deadlines And Submission Requirements
+Working features in this repo:
 
-All deadlines use Pacific Time.
+- **Idea structuring** — topic in, structured problem/method/timeline/evaluation/resources out, plus selectable decision cards
+- **Related works** — OpenAlex search (no API key); checkbox-select papers into the proposal references
+- **Figures** — model-suggested compile-safe LaTeX figures, or upload your own image into the PDF
+- **Draft + review artifacts** — full LaTeX proposal, compliance matrix against the built-in section checklist, and evaluation notes
+- **PDF export** — server-side Tectonic compile, with one auto-repair pass if the first compile fails
+- **Optional second reviewer** — separate `LLM_REVIEW_*` provider for an NSF-style score and suggested edits
+- **Local fallback** — runs without any LLM key using deterministic templates
+- **Browser memory** — save/reload workspace state in `localStorage`
 
-| Stage | Due Date | Submit | Notes |
-| --- | --- | --- | --- |
-| Stage 1: Initial Agent + Workflow Design | Friday, June 5, 2026, 11:59 PM | 5-minute presentation video, initial agent/prototype artifact, optional screenshots or interaction trace. | Stage 1 is graded from the video. The in-person presentation is mandatory but not separately graded; it is for showing motivation, ideas, goals, and peer feedback. Late submissions accepted until Sunday, June 7, 2026, 11:59 PM with a 20% penalty. |
-| Stage 2: Refined Agent + Workflow Usage | Friday, June 12, 2026, 11:59 PM | Refined agent/workflow, `workflow_usage.md`, run evidence, `AI_USAGE.md`. | Late submissions accepted until Sunday, June 14, 2026, 11:59 PM with a 20% penalty. |
-| Stage 3: Final Proposal | Friday, June 12, 2026, 11:59 PM | `proposal.pdf`, proposal source, references or source notes, figure/diagram source if applicable. | Late submissions accepted until Sunday, June 14, 2026, 11:59 PM with a 20% penalty. |
+Sample run (with or without an API key):
 
-## Optional Starter App
+1. Open the app and click **Sample**, or type your own rough idea and click **Structure Idea**.
+2. Accept or edit the suggested fields and decision cards; refresh Related Works and check papers to cite.
+3. Optionally click **Suggest figure** (or upload an image).
+4. Click **Generate proposal**, inspect the PDF / LaTeX / Matrix / Review tabs, then **Get reviewer feedback** if a reviewer model is configured.
+5. Download the `.tex` or compiled PDF from the artifact panel.
 
-This repository includes a small starter app to illustrate one possible proposal-agent workflow. It is optional: you may use it, replace it, or ignore it.
+![Workflow UI](docs/assets/ui-workflow.png)
 
-Example starter screens:
+![Proposal PDF preview](docs/assets/proposal-preview.png)
 
-![Starter app workflow screen](docs/assets/starter-app-workflow.png)
+> Replace these screenshots with fresh captures of the current Research Mentor UI if the ones in `docs/assets/` look out of date.
 
-![Starter app proposal preview screen](docs/assets/starter-app-proposal-preview.png)
+## Tech stack
 
-To run the starter:
+| Layer | Tech |
+| --- | --- |
+| Frontend | React 19, Vite 8, lucide-react |
+| Backend | Node.js (Express 5) |
+| LLMs | Gemini or any OpenAI-compatible chat API (optional) |
+| Literature | [OpenAlex](https://openalex.org/) Works API |
+| PDF | [Tectonic](https://tectonic-typesetting.github.io/) LaTeX engine |
+
+## Getting started
+
+**Requirements:** Node.js 18.18+, npm, and a Tectonic binary on your `PATH` (or at `server/bin/tectonic`, or set `TECTONIC_PATH`). PDF export needs Tectonic; the rest of the UI/API works without it.
 
 ```bash
+git clone https://github.com/rithwik1405/CS222-Spring-Final-Project.git
+cd CS222-Spring-Final-Project
 npm install
+cp .env.example .env   # optional — fill in LLM keys for real generation
 npm run dev
 ```
 
-Open:
+Open [http://127.0.0.1:5174](http://127.0.0.1:5174). The Vite dev server proxies `/api` to the Express API on port `8787`.
 
-```text
-http://127.0.0.1:5174
-```
+Useful scripts:
 
-We encourage students to start with the [Gemini API free tier](https://ai.google.dev/gemini-api/docs/pricing). If the free tier is not enough for your project, email the TA at <yfu093@ucr.edu> to request additional API access. Keep all API keys out of GitHub and document your setup.
+| Command | What it runs |
+| --- | --- |
+| `npm run dev` | API + Vite together |
+| `npm run dev:api` | Express only (`PORT`, default 8787) |
+| `npm run dev:web` | Vite only |
+| `npm run build` | Production frontend build |
+| `npm start` | API only |
 
-## Resources
+Without `LLM_API_KEY` / `LLM_API_URL`, `/api/health` reports `local-fallback` and the server still returns template suggestions and a draft proposal.
 
-Vibe coding tools:
-
-- [Cursor](https://cursor.com/en/students). Students can apply for a student account with their `.edu` email; contact Cursor through the official student page if you need help with the application.
-- [GitHub Copilot](https://docs.github.com/en/copilot/how-tos/copilot-on-github/set-up-copilot/enable-copilot/set-up-for-students)
-- [Google Gemini API](https://ai.google.dev/gemini-api/docs/pricing)
-- [Google Gemini Code Assist](https://developers.google.com/gemini-code-assist/resources/faqs)
-- [Claude / Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview)
-- [Windsurf](https://windsurf.com/windsurf/students)
-- [Cline](https://docs.cline.bot/introduction/overview) / [Roo Code](https://roocode.com/)
-- [ChatGPT](https://chatgpt.com/)
-- [v0 by Vercel](https://v0.dev/)
-
-Tool availability, student plans, and free tiers can change. Check the official pages before relying on a specific plan.
-
-Proposal-agent inspiration:
-
-- [Civio](https://www.civio.ai/) shows how proposal and compliance workflows can become real products. A strong class project can be more than a demo; it can point toward a startup-style opportunity if it solves a real workflow pain.
-
-## Stage 1 Deliverables
-
-Stage 1 focuses on initial agent design and workflow thinking. A polished proposal is not required.
-
-Submit:
-
-- initial agent or prototype demo artifact;
-- 5-minute presentation video or link;
-- mandatory in-person presentation for demonstration and feedback;
-- optional screenshots or interaction trace.
-
-Details: [docs/stage_1_workflow_design.md](docs/stage_1_workflow_design.md)
-
-## Stage 2 Deliverables
-
-Stage 2 focuses on refined agent behavior and workflow usage evidence.
-
-Submit:
-
-- refined agent implementation or reproducible workflow artifact;
-- `workflow_usage.md`;
-- run transcript, screenshots, logs, or demo;
-- `AI_USAGE.md`;
-
-Details: [docs/stage_2_workflow_usage.md](docs/stage_2_workflow_usage.md)
-
-## Stage 3 Deliverables
-
-Stage 3 focuses on final proposal quality.
-
-Submit:
-
-- `proposal.pdf`;
-- `proposal.tex` or equivalent proposal source;
-- references or source notes;
-- figure or diagram source if applicable.
-
-Details: [docs/stage_3_final_proposal.md](docs/stage_3_final_proposal.md)
-
-## Required Proposal Requirements
-
-The final proposal requirements are in:
-
-[docs/proposal_requirements.md](docs/proposal_requirements.md)
-
-Detailed grading is in one file:
-
-[docs/grading_rubric.md](docs/grading_rubric.md)
-
-## Grading Overview
-
-Total: 100 points.
-
-Bonus: up to 5 subjective points for unusually impressive work.
-
-| Stage | Points | What It Evaluates |
-| --- | ---: | --- |
-| Stage 1: Initial Agent + Workflow Design | 30 | Initial agent/prototype, vibe coding demo, proposal-writing research, workflow thinking, and presentation. |
-| Stage 2: Refined Agent + Workflow Usage | 20 | Evidence that the refined agent/workflow was used to generate, revise, and evaluate proposal content. |
-| Stage 3: Final Proposal | 50 | Quality of the submitted `proposal.pdf`, including format, figure, logic, novelty, method, evaluation, feasibility, and writing. |
-
-Detailed grading: [docs/grading_rubric.md](docs/grading_rubric.md)
-
-## Suggested Repo Layout
+## Project structure
 
 ```text
 .
-├── README.md
-├── workflow_usage.md
-├── proposal.pdf
-├── proposal.tex
-├── AI_USAGE.md
-├── evidence/
-└── source-code-or-workflow/
+├── src/App.jsx                 # React workflow UI
+├── src/index.css
+├── server/index.js             # Express routes
+├── server/proposalGenerator.js # LLM prompts, fallback, review, repair
+├── server/literature.js        # OpenAlex search
+├── server/pdfExport.js         # Tectonic compile + LaTeX sanitizers
+├── docs/assets/                # README screenshots
+├── .env.example
+├── package.json
+└── vite.config.js
 ```
 
-## Bottom Line
+## Credits
 
-Stage 1 asks: **What is your initial agent and proposal-writing workflow idea?**
+Solo project by [Rithwik Kondoju](https://github.com/rithwik1405).
 
-Stage 2 asks: **Did you refine and actually use that agent/workflow to produce proposal artifacts?**
+The first commit in this repo started from the course’s optional starter app; the Research Mentor workflow (OpenAlex related works, figures, multi-provider review, LaTeX repair/sanitizers, NSF-oriented prompting, and the current UI) was built on top of that scaffold.
 
-Stage 3 asks: **Is the final proposal itself strong?**
+## Context
+
+Built for CS222 at UC Riverside, Spring 2026.

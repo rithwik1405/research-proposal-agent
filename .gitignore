@@ -1,7 +1,49 @@
+# Dependencies and build
 node_modules/
 dist/
-server/bin/
+
+# Local env / secrets
 .env
 .env.local
-.DS_Store
+.env.*.local
+
+# Bundled LaTeX engine (download separately; see README)
+server/bin/
+
+# Tectonic / compile caches
+.tectonic*
+*.aux
 *.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Generated proposals (keep source in git if you want; skip large PDFs by default)
+proposal.pdf
+*.pdf
+!docs/assets/*.pdf
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Python leftovers (if any)
+__pycache__/
+.venv/
+venv/
+*.pyc
+
+# Model / data dumps
+*.ckpt
+*.pt
+*.bin
+*.h5
+data/
+datasets/
+checkpoints/

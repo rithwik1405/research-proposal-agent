@@ -531,44 +531,6 @@ function App() {
     return { figures: payloadFigures, figureImages };
   }
 
-  function handleFigureImage(fileList) {
-    const file = Array.from(fileList || [])[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const extMatch = file.name.match(/\.(png|jpe?g|pdf)$/i);
-      const ext = extMatch ? extMatch[0].toLowerCase() : '.png';
-      setFigure((current) => ({ ...current, image: { name: `userfigure${ext}`, dataUrl: String(reader.result) } }));
-      setRunLog((current) => [...current, logEntry('Figure', `Uploaded your own figure (${file.name}).`)]);
-      clearArtifacts();
-    };
-    reader.readAsDataURL(file);
-  }
-
-  function clearFigureImage() {
-    setFigure((current) => ({ ...current, image: null }));
-    clearArtifacts();
-  }
-
-  // The figure to inject into the proposal, plus any image bytes for compilation.
-  function figureForGeneration() {
-    if (figure.image) {
-      const caption = figure.caption || 'Figure provided by the author.';
-      const latex = `\\begin{figure}[h]\n\\centering\n\\includegraphics[width=0.85\\linewidth]{${figure.image.name}}\n\\caption{${caption}}\n\\end{figure}`;
-      return {
-        figure: { latex, image: true, imageName: figure.image.name },
-        figureImage: { name: figure.image.name, base64: figure.image.dataUrl }
-      };
-    }
-
-    if (figure.latex) {
-      return { figure: { latex: figure.latex }, figureImage: null };
-    }
-
-    return { figure: null, figureImage: null };
-  }
-
   function toggleSuggestion(suggestion) {
     const accepted = project[suggestion.field] === suggestion.value;
 
